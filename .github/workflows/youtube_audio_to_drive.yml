@@ -19,15 +19,10 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # --- BẮT BUỘC: chọn MỘT trong hai cách ---
-      # Cách 1: chỉ định sẵn ID folder (khuyến nghị nếu đã có)
-      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      # Cách 2: (tuỳ chọn) nếu không có ID, cung cấp tên để script tự tìm/tạo
-      GDRIVE_FOLDER_NAME: ${{ secrets.GDRIVE_FOLDER_NAME }}
-      # Nếu folder ở Shared Drive, khai báo ID Shared Drive để tìm/tạo trong đó
-      GDRIVE_DRIVE_ID: ${{ secrets.GDRIVE_DRIVE_ID }}
-
-      # Service Account JSON (dán nguyên văn)
+      # --- BẮT BUỘC ---
+      # Folder bạn cung cấp:
+      GDRIVE_FOLDER_ID: "1V9qkTesXnogNiTPUvDZOwJPj4Op4lTHF"
+      # DÁN NGUYÊN VĂN JSON của SA (email: gdrive-automation@hidden-matter-469404-t5.iam.gserviceaccount.com)
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
       # --- TUỲ CHỌN ---
