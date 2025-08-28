@@ -1,4 +1,4 @@
-name: YouTube Audio → Drive (no artifact)
+name: YouTube Audio → Drive (no artifact, 1 link/run)
 
 on:
   workflow_dispatch: {}
@@ -19,17 +19,22 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # --- BẮT BUỘC ---
-      # Folder bạn cung cấp:
+      # --- THƯ MỤC ĐÍCH ---
       GDRIVE_FOLDER_ID: "1V9qkTesXnogNiTPUvDZOwJPj4Op4lTHF"
-      # DÁN NGUYÊN VĂN JSON của SA (email: gdrive-automation@hidden-matter-469404-t5.iam.gserviceaccount.com)
+
+      # --- ƯU TIÊN OAUTH (khuyên dùng để tránh quota SA) ---
+      # Đặt secret chứa TOÀN BỘ JSON token OAuth (đã cấp Drive):
+      # GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
+      GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
+
+      # --- FALLBACK: SERVICE ACCOUNT (nếu không có OAuth) ---
+      # Dán nguyên văn JSON Service Account
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
       # --- TUỲ CHỌN ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
-      SLEEP_SECONDS: "8"
-      # Bật test đẩy file nhỏ khi links.txt rỗng:
-      # SMOKE_TEST: "1"
+      SLEEP_SECONDS: "2"     # bạn muốn 2s giữa các link (ở đây chỉ 1 link/run)
+      # SMOKE_TEST: "1"      # bật nếu muốn thử upload file test khi links.txt rỗng
 
     steps:
       - name: Checkout
@@ -53,7 +58,7 @@ jobs:
           [ -f data/links.txt ] || : > data/links.txt
           [ -f data/dalay.txt ] || : > data/dalay.txt
 
-      - name: Run downloader (upload thẳng Drive)
+      - name: Run downloader (1 link only, upload thẳng Drive)
         run: |
           python scripts/yt_audio_to_drive.py
 
