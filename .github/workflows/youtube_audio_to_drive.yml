@@ -19,14 +19,20 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # --- BẮT BUỘC ---
+      # --- BẮT BUỘC: chọn MỘT trong hai cách ---
+      # Cách 1: chỉ định sẵn ID folder (khuyến nghị nếu đã có)
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      # Dán NGUYÊN VĂN JSON Service Account vào secret này
+      # Cách 2: (tuỳ chọn) nếu không có ID, cung cấp tên để script tự tìm/tạo
+      GDRIVE_FOLDER_NAME: ${{ secrets.GDRIVE_FOLDER_NAME }}
+      # Nếu folder ở Shared Drive, khai báo ID Shared Drive để tìm/tạo trong đó
+      GDRIVE_DRIVE_ID: ${{ secrets.GDRIVE_DRIVE_ID }}
+
+      # Service Account JSON (dán nguyên văn)
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
       # --- TUỲ CHỌN ---
-      PO_TOKEN: ${{ secrets.PO_TOKEN }}  # nếu có
-      SLEEP_SECONDS: "8"                 # đổi nếu muốn (độ trễ giữa 2 lần tải)
+      PO_TOKEN: ${{ secrets.PO_TOKEN }}
+      SLEEP_SECONDS: "8"
 
     steps:
       - name: Checkout
@@ -49,7 +55,6 @@ jobs:
           mkdir -p data/audio
           [ -f data/links.txt ] || : > data/links.txt
           [ -f data/dalay.txt ] || : > data/dalay.txt
-          # cookies_multi.txt & po_token.txt nếu cần thì tự đặt trong data/
 
       - name: Run downloader (upload thẳng Drive)
         run: |
@@ -66,4 +71,3 @@ jobs:
             git push
           else
             echo "No changes in dalay.txt"
-          fi
