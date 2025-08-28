@@ -41,7 +41,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "0").strip() == "1"
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "20"))  # <<< chạy 20 link/lần
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "1000"))  # <<< chạy 1000 link/lần
 
 # -------- ffmpeg/ffprobe & yt-dlp --------
 def _resolve_ffmpeg_dir() -> Optional[str]:
