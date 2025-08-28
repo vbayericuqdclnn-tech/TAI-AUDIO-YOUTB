@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
+# YouTube audio -> M4A -> Google Drive (Service Account)
+# - Dedupe via data/dalay.txt
+# - Cookie rotation via data/cookies_multi.txt (Netscape hoặc JSON; tách bằng "=====")
+# - Player-client rotation + optional PO_TOKEN (data/po_token.txt hoặc env PO_TOKEN)
+# - Sleep giữa các link (env SLEEP_SECONDS, mặc định 8s)
+# - Upload Drive: bắt buộc env GDRIVE_SA_JSON (chứa JSON của SA), GDRIVE_FOLDER_ID (đã gán trong workflow)
+# - ĐÃ FIX: không dùng f-string có backslash trong biểu thức khi query Drive
+
 import os, sys, re, json, time, shutil, tempfile
 from pathlib import Path
 from typing import Optional, Tuple, List
 
+# -------- Paths --------
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR  = REPO_ROOT / "data"
 OUT_DIR   = DATA_DIR / "audio"
@@ -10,7 +19,7 @@ LINKS     = DATA_DIR / "links.txt"
 DALAY     = DATA_DIR / "dalay.txt"
 COOKIES_MULTI = DATA_DIR / "cookies_multi.txt"
 PO_TOKEN_FILE = DATA_DIR / "po_token.txt"
-TOKEN_STORE   = DATA_DIR / "drive_token.json"  # dùng cho OAuth khi chạy local
+TOKEN_STORE   = DATA_DIR / "drive_token.json"  # chỉ dùng khi chạy local OAuth
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -19,9 +28,9 @@ if not DALAY.exists(): DALAY.write_text("", encoding="utf-8")
 
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
 
+# -------- yt-dlp & ffmpeg --------
 import yt_dlp
 
-# ffmpeg portable trước, hệ thống sau
 FFMPEG_DIR = None
 try:
     import imageio_ffmpeg
@@ -33,10 +42,10 @@ except Exception:
         FFMPEG_DIR = str(Path(bin_path).parent)
         print(f"[ffmpeg] Dùng ffmpeg hệ thống: {FFMPEG_DIR}")
     else:
-        print("[ERROR] Không tìm thấy ffmpeg (thêm imageio-ffmpeg vào requirements.txt).")
+        print("[ERROR] Không tìm thấy ffmpeg. Hãy để imageio-ffmpeg trong requirements.txt.")
         sys.exit(1)
 
-# ----------------- Google Drive -----------------
+# -------- Google Drive --------
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
@@ -46,6 +55,7 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
+# -------- Utils --------
 def read_lines_clean(p: Path) -> List[str]:
     if not p.exists(): return []
     lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
@@ -116,6 +126,7 @@ def prepare_cookie_files(cookies_multi_path: Path) -> List[str]:
 COOKIE_FILES = prepare_cookie_files(COOKIES_MULTI)
 print(f"Cookies sets hợp lệ: {len(COOKIE_FILES)}" if COOKIE_FILES else "Không dùng cookies hoặc tất cả set không hợp lệ.")
 
+# -------- Build link list --------
 all_links  = read_lines_clean(LINKS)
 done_links = set(read_lines_clean(DALAY))
 seen, new_links = set(), []
@@ -126,7 +137,7 @@ print(f"Tổng: {len(all_links)} | Đã làm: {len(done_links)} | Mới sẽ x�
 
 po_token = (os.environ.get("PO_TOKEN") or (PO_TOKEN_FILE.read_text(encoding="utf-8").strip() if PO_TOKEN_FILE.exists() else "")).strip()
 
-# ---- Drive auth ----
+# -------- Drive auth & helpers --------
 def load_sa_credentials() -> Optional[service_account.Credentials]:
     sa_json_text = os.environ.get("GDRIVE_SA_JSON", "").strip()
     sa_file = os.environ.get("GDRIVE_SA_FILE", "").strip()
@@ -146,10 +157,10 @@ def load_sa_credentials() -> Optional[service_account.Credentials]:
 def init_drive_service():
     creds = load_sa_credentials()
     if creds:
-        # In email SA để bạn share folder đúng
         try:
             sa_email = getattr(creds, "service_account_email", None)
-            if sa_email: print(f"[Drive] Service Account email: {sa_email}")
+            if sa_email:
+                print(f"[Drive] Service Account email: {sa_email}")
         except Exception:
             pass
         print("[Drive] Dùng Service Account.")
@@ -158,7 +169,7 @@ def init_drive_service():
         except Exception as e:
             print(f"[Drive] Không khởi tạo được Drive service (SA): {e}")
             return None
-    # OAuth chỉ cho local (Actions không tương tác)
+    # OAuth (local) – không dùng trên Actions
     try:
         creds = None
         if TOKEN_STORE.exists():
@@ -182,62 +193,18 @@ def init_drive_service():
         print(f"[Drive] OAuth lỗi: {e}")
         return None
 
-# NEW: hỗ trợ My Drive & Shared Drive, tìm/tạo folder theo ID/Name
-def ensure_drive_folder(service, folder_id: str, folder_name: str, drive_id: str) -> Optional[str]:
-    if not service:
-        print("[Drive] Chưa có service → bỏ qua.")
-        return None
-
-    # 1) Nếu có ID: thử lấy (hỗ trợ Shared Drives)
-    if folder_id:
-        try:
-            meta = service.files().get(
-                fileId=folder_id, fields="id,name,parents,driveId",
-                supportsAllDrives=True
-            ).execute()
-            print(f"[Drive] Dùng folder: {meta.get('name')} ({meta.get('id')})")
-            return meta["id"]
-        except HttpError as e:
-            print(f"[Drive] Không truy cập được Folder ID '{folder_id}': {e}")
-
-    # 2) Nếu có tên: tìm theo tên
-    if folder_name:
-        q = "mimeType='application/vnd.google-apps.folder' and name='{}' and trashed=false".format(
-            folder_name.replace("'", "\\'")
-        )
-        params = {
-            "q": q,
-            "pageSize": 10,
-            "fields": "files(id,name,driveId,parents)",
-            "supportsAllDrives": True,
-            "includeItemsFromAllDrives": True,
-        }
-        if drive_id:
-            params["corpora"] = "drive"
-            params["driveId"] = drive_id
-        else:
-            params["corpora"] = "user"
-        res = service.files().list(**params).execute()
-        files = res.get("files", [])
-        if files:
-            fid = files[0]["id"]
-            print(f"[Drive] Tìm thấy folder theo tên: {folder_name} ({fid})")
-            return fid
-
-        # 3) Không có → tạo mới
-        body = {
-            "name": folder_name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [drive_id if drive_id else "root"]
-        }
-        created = service.files().create(
-            body=body, fields="id,name", supportsAllDrives=True
+def ensure_folder_by_id(service, folder_id: str) -> Optional[str]:
+    if not service or not folder_id:
+        print("[Drive] Thiếu service hoặc Folder ID."); return None
+    try:
+        meta = service.files().get(
+            fileId=folder_id, fields="id,name", supportsAllDrives=True
         ).execute()
-        print(f"[Drive] Đã tạo folder: {created.get('name')} ({created.get('id')})")
-        return created["id"]
-
-    print("[Drive] Thiếu cả GDRIVE_FOLDER_ID lẫn GDRIVE_FOLDER_NAME.")
-    return None
+        print(f"[Drive] Dùng folder: {meta.get('name')} ({meta.get('id')})")
+        return meta["id"]
+    except HttpError as e:
+        print(f"[Drive] Không truy cập được Folder ID '{folder_id}': {e}")
+        return None
 
 def _escape_drive_literal(s: str) -> str:
     return s.replace("'", "\\'")
@@ -245,21 +212,16 @@ def _escape_drive_literal(s: str) -> str:
 def drive_upload_file(service, file_path: Path, folder_id: str):
     name = file_path.name
     esc_name = _escape_drive_literal(name)
-
-    # supportsAllDrives cho Shared Drives
     q = "name = '{}' and '{}' in parents and trashed = false".format(esc_name, folder_id)
     res = service.files().list(
         q=q, pageSize=1, fields="files(id, name, parents, driveId)",
         supportsAllDrives=True, includeItemsFromAllDrives=True
     ).execute()
     files = res.get("files", [])
-
     media = MediaFileUpload(str(file_path), mimetype="audio/mp4", resumable=True)
     if files:
         file_id = files[0]["id"]
-        upd = service.files().update(
-            fileId=file_id, media_body=media, supportsAllDrives=True
-        ).execute()
+        upd = service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
         return upd["id"], "updated"
     else:
         body = {"name": name, "parents": [folder_id]}
@@ -268,7 +230,7 @@ def drive_upload_file(service, file_path: Path, folder_id: str):
         ).execute()
         return created["id"], "created"
 
-# ==== yt-dlp config ====
+# -------- yt-dlp opts --------
 BASE_YDL_OPTS = {
     "format": "bestaudio[ext=m4a]/bestaudio/best",
     "merge_output_format": "m4a",
@@ -287,6 +249,7 @@ BASE_YDL_OPTS = {
     "force_ipv4": True,
     "ffmpeg_location": FFMPEG_DIR,
 }
+
 ROTATE_TRIGGERS = (
     "Sign in to confirm you’re not a bot", "Sign in to confirm you're not a bot",
     "HTTP Error 429", "HTTP Error 403", "Forbidden", "410: Gone", "HTTP Error 410",
@@ -334,17 +297,10 @@ def try_download_with_cookies(url: str) -> Tuple[bool, Optional[str], Optional[P
                 else: continue
     return False, (last_err or "Blocked/failed on all cookie sets/clients."), latest_file
 
-# ---- Drive setup & main loop ----
-GDRIVE_FOLDER_ID   = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
-GDRIVE_FOLDER_NAME = os.environ.get("GDRIVE_FOLDER_NAME", "").strip()  # tuỳ chọn
-GDRIVE_DRIVE_ID    = os.environ.get("GDRIVE_DRIVE_ID", "").strip()     # tuỳ chọn (Shared Drive ID)
-
+# -------- Main --------
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 drive_service = init_drive_service()
-resolved_folder_id = None
-if drive_service:
-    resolved_folder_id = ensure_drive_folder(
-        drive_service, GDRIVE_FOLDER_ID, GDRIVE_FOLDER_NAME, GDRIVE_DRIVE_ID
-    )
+resolved_folder_id = ensure_folder_by_id(drive_service, GDRIVE_FOLDER_ID) if drive_service else None
 
 success, failed, uploaded = [], [], []
 if not new_links:
