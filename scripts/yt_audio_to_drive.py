@@ -1,4 +1,3 @@
-@@ -1,33 +1,28 @@
 # -*- coding: utf-8 -*-
 # YouTube audio -> M4A -> Google Drive
 # - Mỗi lần chạy: 1 link (lấy dòng mới đầu tiên trong data/links.txt chưa có trong data/dalay.txt)
