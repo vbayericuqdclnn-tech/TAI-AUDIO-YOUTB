@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # YouTube audio -> M4A -> Google Drive (Service Account)
 # - Dedupe via data/dalay.txt
-# - Cookie rotation via data/cookies_multi.txt (Netscape hoặc JSON; tách bằng "=====")
+# - Cookie rotation via data/cookies_multi.txt (Netscape hoặc JSON, ngăn cách bằng "=====")
 # - Player-client rotation + optional PO_TOKEN (data/po_token.txt hoặc env PO_TOKEN)
 # - Sleep giữa các link (env SLEEP_SECONDS, mặc định 8s)
-# - Upload Drive: bắt buộc env GDRIVE_SA_JSON (chứa JSON của SA), GDRIVE_FOLDER_ID (đã gán trong workflow)
-# - ĐÃ FIX: không dùng f-string có backslash trong biểu thức khi query Drive
+# - Upload Drive: cần env GDRIVE_SA_JSON (nội dung JSON của SA), GDRIVE_FOLDER_ID
+# - FIX: dùng full scope Drive để SA truy cập folder đã share; tránh f-string chứa backslash trong biểu thức
 
 import os, sys, re, json, time, shutil, tempfile
 from pathlib import Path
@@ -27,6 +27,7 @@ if not LINKS.exists(): LINKS.write_text("", encoding="utf-8")
 if not DALAY.exists(): DALAY.write_text("", encoding="utf-8")
 
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
+SMOKE_TEST = os.environ.get("SMOKE_TEST", "0").strip() == "1"
 
 # -------- yt-dlp & ffmpeg --------
 import yt_dlp
@@ -53,7 +54,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import HttpError
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# DÙNG FULL SCOPE để SA truy cập folder được share
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 # -------- Utils --------
 def read_lines_clean(p: Path) -> List[str]:
@@ -305,6 +307,15 @@ resolved_folder_id = ensure_folder_by_id(drive_service, GDRIVE_FOLDER_ID) if dri
 success, failed, uploaded = [], [], []
 if not new_links:
     print("Không có link mới để tải.")
+    # Smoke test optional: tạo file nhỏ để test quyền Drive
+    if drive_service and resolved_folder_id and SMOKE_TEST:
+        testf = OUT_DIR / "SMOKE_TEST.txt"
+        testf.write_text("ok", encoding="utf-8")
+        try:
+            fid, action = drive_upload_file(drive_service, testf, resolved_folder_id)
+            print(f"[Drive] {action} SMOKE_TEST.txt ({fid})")
+        except Exception as e:
+            print(f"[Drive] Smoke test lỗi: {e}")
 
 for i, url in enumerate(new_links, 1):
     print(f"\n[{i}/{len(new_links)}] Download M4A: {url}")
