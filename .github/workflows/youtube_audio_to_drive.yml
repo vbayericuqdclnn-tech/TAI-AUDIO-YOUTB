@@ -1,4 +1,4 @@
-name: YouTube Audio → Drive
+name: YouTube Audio → Drive (no artifact)
 
 on:
   workflow_dispatch: {}
@@ -21,50 +21,39 @@ jobs:
     env:
       # --- BẮT BUỘC ---
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      # Đặt nguyên nội dung JSON của Service Account vào secret này
+      # Dán NGUYÊN VĂN JSON Service Account vào secret này
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
       # --- TUỲ CHỌN ---
-      PO_TOKEN: ${{ secrets.PO_TOKEN }}         # nếu có
-      SLEEP_SECONDS: "8"                        # đổi nếu muốn
+      PO_TOKEN: ${{ secrets.PO_TOKEN }}  # nếu có
+      SLEEP_SECONDS: "8"                 # đổi nếu muốn (độ trễ giữa 2 lần tải)
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      - name: Setup Python
+      - name: Setup Python (cache pip)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "requirements.txt"
 
       - name: Install Python deps
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
 
-      - name: Ensure data folders
+      - name: Ensure data folder & files
         run: |
           mkdir -p data/audio
           [ -f data/links.txt ] || : > data/links.txt
           [ -f data/dalay.txt ] || : > data/dalay.txt
+          # cookies_multi.txt & po_token.txt nếu cần thì tự đặt trong data/
 
-      - name: Run downloader
+      - name: Run downloader (upload thẳng Drive)
         run: |
           python scripts/yt_audio_to_drive.py
-
-      - name: Upload audio as artifact (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: audio-m4a
-          path: data/audio/*.m4a
-          if-no-files-found: ignore
-          retention-days: 5
 
       - name: Commit updated dalay.txt
         run: |
