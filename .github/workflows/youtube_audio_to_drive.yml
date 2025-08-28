@@ -28,6 +28,8 @@ jobs:
       # --- TUỲ CHỌN ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
       SLEEP_SECONDS: "8"
+      # Bật test đẩy file nhỏ khi links.txt rỗng:
+      # SMOKE_TEST: "1"
 
     steps:
       - name: Checkout
@@ -55,14 +57,14 @@ jobs:
         run: |
           python scripts/yt_audio_to_drive.py
 
-      - name: Commit updated dalay.txt
+      - name: Commit updated dalay.txt (if changed)
         run: |
-          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet -- data/dalay.txt; then
+          if git diff --quiet --exit-code -- data/dalay.txt; then
+            echo "No changes in dalay.txt"
+          else
             git add data/dalay.txt
             git commit -m "chore: update dalay.txt (YouTube audio processed)"
             git push
-          else
-            echo "No changes in dalay.txt"
+          fi
