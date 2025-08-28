@@ -1,0 +1,80 @@
+name: YouTube Audio → Drive
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Asia/Bangkok (UTC+7): 10:00, 16:00, 22:00
+    - cron: "0 3 * * *"
+    - cron: "0 9 * * *"
+    - cron: "0 15 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yt-audio-drive
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      # --- BẮT BUỘC ---
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      # Đặt nguyên nội dung JSON của Service Account vào secret này
+      GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+
+      # --- TUỲ CHỌN ---
+      PO_TOKEN: ${{ secrets.PO_TOKEN }}         # nếu có
+      SLEEP_SECONDS: "8"                        # đổi nếu muốn
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Ensure data folders
+        run: |
+          mkdir -p data/audio
+          [ -f data/links.txt ] || : > data/links.txt
+          [ -f data/dalay.txt ] || : > data/dalay.txt
+
+      - name: Run downloader
+        run: |
+          python scripts/yt_audio_to_drive.py
+
+      - name: Upload audio as artifact (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-m4a
+          path: data/audio/*.m4a
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Commit updated dalay.txt
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- data/dalay.txt; then
+            git add data/dalay.txt
+            git commit -m "chore: update dalay.txt (YouTube audio processed)"
+            git push
+          else
+            echo "No changes in dalay.txt"
+          fi
