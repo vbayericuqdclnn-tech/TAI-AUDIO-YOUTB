@@ -18,23 +18,13 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
-      # --- THƯ MỤC ĐÍCH ---
       GDRIVE_FOLDER_ID: "1V9qkTesXnogNiTPUvDZOwJPj4Op4lTHF"
-
-      # --- ƯU TIÊN OAUTH (khuyên dùng để tránh quota SA) ---
-      # Đặt secret chứa TOÀN BỘ JSON token OAuth (đã cấp Drive):
-      # GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
       GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
-
-      # --- FALLBACK: SERVICE ACCOUNT (nếu không có OAuth) ---
-      # Dán nguyên văn JSON Service Account
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-
-      # --- TUỲ CHỌN ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
-      SLEEP_SECONDS: "2"     # bạn muốn 2s giữa các link (ở đây chỉ 1 link/run)
-      # SMOKE_TEST: "1"      # bật nếu muốn thử upload file test khi links.txt rỗng
+      SLEEP_SECONDS: "2"
 
     steps:
       - name: Checkout
@@ -52,24 +42,21 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt
 
-      - name: Ensure data folder & files
+      - name: Debug links.txt
         run: |
-          mkdir -p data/audio
-          [ -f data/links.txt ] || : > data/links.txt
-          [ -f data/dalay.txt ] || : > data/dalay.txt
+          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "Repo root:"; ls -la
+          echo "data/:"; ls -la data || true
+          if [ -f data/links.txt ]; then
+            echo "links.txt size: $(wc -c < data/links.txt) bytes | lines: $(wc -l < data/links.txt)"
+            sed -n '1,5p' data/links.txt | nl -ba
+          else
+            echo "⚠️  data/links.txt MISSING"
+          fi
 
       - name: Run downloader (1 link only, upload thẳng Drive)
+        env:
+          PYTHONUNBUFFERED: "1"
+          PYTHONUTF8: "1"
         run: |
-          python scripts/yt_audio_to_drive.py
-
-      - name: Commit updated dalay.txt (if changed)
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet --exit-code -- data/dalay.txt; then
-            echo "No changes in dalay.txt"
-          else
-            git add data/dalay.txt
-            git commit -m "chore: update dalay.txt (YouTube audio processed)"
-            git push
-          fi
+          python -u scripts/yt_audio_to_drive.py
