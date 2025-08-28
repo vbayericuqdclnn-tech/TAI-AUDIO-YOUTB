@@ -3,9 +3,9 @@
 # - Dedupe via data/dalay.txt
 # - Cookie rotation via data/cookies_multi.txt (Netscape or JSON export; split by "=====")
 # - Player-client rotation + optional PO_TOKEN (data/po_token.txt or env PO_TOKEN)
-# - Sleep between links (env SLEEP_SECONDS, default 8s)
-# - Upload Drive (env GDRIVE_FOLDER_ID + either env GDRIVE_SA_JSON content or env GDRIVE_SA_FILE path)
-# - On Actions: OAuth flow is NOT interactive → use Service Account
+# - Sleep giữa các link (env SLEEP_SECONDS, mặc định 8s)
+# - Upload Drive (env GDRIVE_FOLDER_ID + env GDRIVE_SA_JSON chứa nguyên văn SA JSON)
+# - ĐÃ SỬA: tránh f-string có backslash trong biểu thức (query Drive)
 
 import os, sys, re, json, time, shutil, tempfile
 from pathlib import Path
@@ -19,7 +19,7 @@ LINKS     = DATA_DIR / "links.txt"
 DALAY     = DATA_DIR / "dalay.txt"
 COOKIES_MULTI = DATA_DIR / "cookies_multi.txt"
 PO_TOKEN_FILE = DATA_DIR / "po_token.txt"
-TOKEN_STORE   = DATA_DIR / "drive_token.json"  # chỉ dùng khi chạy local với OAuth
+TOKEN_STORE   = DATA_DIR / "drive_token.json"  # chỉ dùng nếu chạy local với OAuth
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,17 +30,20 @@ SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
 
 # -------- Imports (đã cài từ requirements.txt) --------
 import yt_dlp
-import shutil as _shutil
 
-# ffmpeg: trên Actions đã cài sẵn qua apt. Nếu không có, thử imageio-ffmpeg
+# ffmpeg: ưu tiên portable qua imageio-ffmpeg; nếu không có thì thử hệ thống
 FFMPEG_DIR = None
-if _shutil.which("ffmpeg") is None:
-    try:
-        import imageio_ffmpeg
-        FFMPEG_DIR = str(Path(imageio_ffmpeg.get_ffmpeg_exe()).parent)
-        print(f"[ffmpeg] Dùng ffmpeg portable tại: {FFMPEG_DIR}")
-    except Exception as e:
-        print("[ERROR] Không tìm thấy ffmpeg. Hãy cài ffmpeg hoặc thêm imageio-ffmpeg vào requirements.")
+try:
+    import imageio_ffmpeg
+    FFMPEG_DIR = str(Path(imageio_ffmpeg.get_ffmpeg_exe()).parent)
+    print(f"[ffmpeg] Dùng ffmpeg portable: {FFMPEG_DIR}")
+except Exception:
+    bin_path = shutil.which("ffmpeg")
+    if bin_path:
+        FFMPEG_DIR = str(Path(bin_path).parent)
+        print(f"[ffmpeg] Dùng ffmpeg từ hệ thống: {FFMPEG_DIR}")
+    else:
+        print("[ERROR] Không tìm thấy ffmpeg. Cài imageio-ffmpeg trong requirements.txt.")
         sys.exit(1)
 
 # -------- Drive imports --------
@@ -168,7 +171,6 @@ def load_sa_credentials() -> Optional[service_account.Credentials]:
     return None
 
 def init_drive_service() -> Optional[any]:
-    # Ưu tiên SA khi chạy trên GitHub Actions (không tương tác)
     creds = load_sa_credentials()
     if creds:
         print("[Drive] Dùng Service Account.")
@@ -177,7 +179,7 @@ def init_drive_service() -> Optional[any]:
         except Exception as e:
             print(f"[Drive] Không khởi tạo được Drive service (SA): {e}")
             return None
-    # OAuth chỉ dành cho chạy local (tương tác)
+    # OAuth chỉ dùng local (tương tác); Actions không dùng được
     try:
         if TOKEN_STORE.exists():
             creds = Credentials.from_authorized_user_file(str(TOKEN_STORE), SCOPES)
@@ -186,7 +188,6 @@ def init_drive_service() -> Optional[any]:
                 from google.auth.transport.requests import Request
                 creds.refresh(Request())
             else:
-                # Tìm client_secret.json cạnh script nếu muốn chạy local
                 maybe = list(REPO_ROOT.glob("client_secret*.json"))
                 if not maybe:
                     print("[Drive] Không có SA cũng không có client_secret.json → bỏ qua upload Drive.")
@@ -211,10 +212,15 @@ if drive_service and GDRIVE_FOLDER_ID:
         print(f"[Drive] Folder ID không hợp lệ/không truy cập được: {e}")
         drive_service = None
 
+def _escape_drive_literal(s: str) -> str:
+    # Trong truy vấn Drive, string literal dùng '...' → cần escape dấu '
+    return s.replace("'", "\\'")
+
 def drive_upload_file(service, file_path: Path, folder_id: str):
     name = file_path.name
-    # tìm file trùng tên trong folder để update thay vì tạo mới
-    q = f"name = '{name.replace(\"'\", \"\\'\")}' and '{folder_id}' in parents and trashed = false"
+    esc_name = _escape_drive_literal(name)
+    # KHÔNG dùng f-string có backslash trong biểu thức
+    q = "name = '{}' and '{}' in parents and trashed = false".format(esc_name, folder_id)
     res = service.files().list(q=q, pageSize=1, fields="files(id, name)").execute()
     files = res.get("files", [])
     media = MediaFileUpload(str(file_path), mimetype="audio/mp4", resumable=True)
@@ -248,9 +254,8 @@ BASE_YDL_OPTS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     },
     "force_ipv4": True,
+    "ffmpeg_location": FFMPEG_DIR,
 }
-if FFMPEG_DIR:
-    BASE_YDL_OPTS["ffmpeg_location"] = FFMPEG_DIR
 
 ROTATE_TRIGGERS = (
     "Sign in to confirm you’re not a bot",
@@ -355,7 +360,7 @@ for i, url in enumerate(new_links, 1):
             time.sleep(1)
         print(" " * 24, end="\r")
 
-# Đồng bộ dalay.txt lên Drive để giữ lịch sử (không bắt buộc)
+# Đồng bộ dalay.txt lên Drive (không bắt buộc)
 if drive_service and GDRIVE_FOLDER_ID and DALAY.exists():
     try:
         fid, action = drive_upload_file(drive_service, DALAY, GDRIVE_FOLDER_ID)
