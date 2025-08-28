@@ -3,9 +3,10 @@
 # - Dedupe via data/dalay.txt
 # - Cookie rotation via data/cookies_multi.txt (Netscape hoặc JSON, ngăn cách bằng "=====")
 # - Player-client rotation + optional PO_TOKEN (data/po_token.txt hoặc env PO_TOKEN)
-# - Sleep giữa các link (env SLEEP_SECONDS, mặc định 8s)
+# - Sleep giữa các link (env SLEEP_SECONDS, mặc định 8s) — lần này chỉ 1 link nên thường không dùng
 # - Upload Drive: cần env GDRIVE_SA_JSON (nội dung JSON của SA), GDRIVE_FOLDER_ID
-# - FIX: dùng full scope Drive để SA truy cập folder đã share; tránh f-string chứa backslash trong biểu thức
+# - FIX trước đó: full Drive scope; tránh f-string chứa backslash trong biểu thức
+# - MỚI: Mỗi lần chạy chỉ lấy 1 link đầu tiên cần xử lý
 
 import os, sys, re, json, time, shutil, tempfile
 from pathlib import Path
@@ -136,6 +137,9 @@ for url in all_links:
     if url in done_links or url in seen: continue
     seen.add(url); new_links.append(url)
 print(f"Tổng: {len(all_links)} | Đã làm: {len(done_links)} | Mới sẽ xử lý: {len(new_links)}")
+
+# MỚI: chỉ chạy 1 link mỗi lần
+run_list = new_links[:1]
 
 po_token = (os.environ.get("PO_TOKEN") or (PO_TOKEN_FILE.read_text(encoding="utf-8").strip() if PO_TOKEN_FILE.exists() else "")).strip()
 
@@ -305,7 +309,7 @@ drive_service = init_drive_service()
 resolved_folder_id = ensure_folder_by_id(drive_service, GDRIVE_FOLDER_ID) if drive_service else None
 
 success, failed, uploaded = [], [], []
-if not new_links:
+if not run_list:
     print("Không có link mới để tải.")
     # Smoke test optional: tạo file nhỏ để test quyền Drive
     if drive_service and resolved_folder_id and SMOKE_TEST:
@@ -317,8 +321,8 @@ if not new_links:
         except Exception as e:
             print(f"[Drive] Smoke test lỗi: {e}")
 
-for i, url in enumerate(new_links, 1):
-    print(f"\n[{i}/{len(new_links)}] Download M4A: {url}")
+for i, url in enumerate(run_list, 1):  # chỉ 1 link
+    print(f"\n[{i}/{len(run_list)}] Download M4A: {url}")
     ok, err, fpath = try_download_with_cookies(url)
     if ok:
         DALAY.open("a", encoding="utf-8").write(url + "\n")
@@ -335,7 +339,8 @@ for i, url in enumerate(new_links, 1):
         failed.append((url, err))
         print(f" -> FAIL: {err}")
 
-    if i < len(new_links):
+    # vì chỉ 1 link nên block nghỉ phía dưới hầu như không chạy
+    if i < len(run_list):
         for t in range(SLEEP_SECONDS, 0, -1):
             print(f"   Nghỉ {t}s...", end="\r"); time.sleep(1)
         print(" " * 24, end="\r")
