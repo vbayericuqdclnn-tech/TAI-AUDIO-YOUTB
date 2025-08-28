@@ -36,7 +36,6 @@ TOKEN_STORE   = DATA_DIR / "drive_token.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-@@ -36,10 +31,9 @@
 
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "0").strip() == "1"
