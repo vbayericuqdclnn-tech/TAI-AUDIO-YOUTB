@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
 # YouTube audio -> M4A -> Google Drive
-# - Mỗi lần chạy chỉ xử lý 1 link (lấy link mới đầu tiên trong data/links.txt chưa nằm trong data/dalay.txt)
-# - Cookie rotation (data/cookies_multi.txt, Netscape hoặc JSON; ngăn cách bằng "=====")
-# - Player-client rotation với yt-dlp (android/web/web_embedded) + optional PO_TOKEN
-# - Upload Drive: ƯU TIÊN OAuth (GDRIVE_OAUTH_TOKEN_JSON). Nếu không có sẽ dùng Service Account (GDRIVE_SA_JSON).
-# - Full Drive scope để đọc/ghi thư mục đã share.
-# - Tránh f-string chứa backslash trong biểu thức (query Drive dùng .format)
-# - Giữ logic dalay.txt/chống trùng; có thể upload dalay.txt lên Drive.
+# - Mỗi lần chạy: 1 link (lấy dòng mới đầu tiên trong data/links.txt chưa có trong data/dalay.txt)
+# - Cookie rotation (data/cookies_multi.txt, Netscape hoặc JSON; ngăn cách "=====")
+# - Player client rotation: web -> web_embedded -> android (khi có cookie); android -> web -> web_embedded (khi ẩn danh)
+# - PO_TOKEN tuỳ chọn (env PO_TOKEN hoặc data/po_token.txt)
+# - Upload Drive: ƯU TIÊN OAuth (GDRIVE_OAUTH_TOKEN_JSON) rồi mới fallback Service Account (GDRIVE_SA_JSON)
+# - Full Drive scope; tránh f-string chứa backslash
+# - Sửa ffmpeg/ffprobe: chỉ set ffmpeg_location khi PATH có đủ ffmpeg & ffprobe cùng thư mục
 
 import os, sys, re, json, time, shutil, tempfile
 from pathlib import Path
 from typing import Optional, Tuple, List
+
+# Ép log xả theo dòng nếu môi trường cho phép
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    os.environ["PYTHONUNBUFFERED"] = "1"
 
 # -------- Paths --------
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +27,7 @@ LINKS     = DATA_DIR / "links.txt"
 DALAY     = DATA_DIR / "dalay.txt"
 COOKIES_MULTI = DATA_DIR / "cookies_multi.txt"
 PO_TOKEN_FILE = DATA_DIR / "po_token.txt"
-TOKEN_STORE   = DATA_DIR / "drive_token.json"  # chỉ dùng nếu chạy local với OAuth interactive
+TOKEN_STORE   = DATA_DIR / "drive_token.json"  # chỉ dùng local nếu OAuth interactive
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,22 +37,30 @@ if not DALAY.exists(): DALAY.write_text("", encoding="utf-8")
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "0").strip() == "1"
 
-# -------- yt-dlp & ffmpeg --------
-import yt_dlp
+# -------- ffmpeg/ffprobe & yt-dlp --------
+def _resolve_ffmpeg_dir() -> Optional[str]:
+    """Trả về thư mục chung của ffmpeg & ffprobe nếu cùng chỗ; nếu không, None để dùng PATH."""
+    ffmpeg_bin  = shutil.which("ffmpeg")
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffmpeg_bin and ffprobe_bin:
+        p1, p2 = Path(ffmpeg_bin).parent, Path(ffprobe_bin).parent
+        if p1 == p2:
+            print(f"[ffmpeg] Dùng system ffmpeg/ffprobe: {p1}")
+            return str(p1)
+        print(f"[ffmpeg] ffmpeg tại {p1}, ffprobe tại {p2} -> dùng PATH, không set ffmpeg_location")
+        return None
+    # fallback: imageio-ffmpeg (thường chỉ có ffmpeg, không có ffprobe)
+    try:
+        import imageio_ffmpeg  # noqa
+        alt = Path(__import__("imageio_ffmpeg").get_ffmpeg_exe()).parent  # type: ignore
+        print(f"[ffmpeg] Tìm thấy ffmpeg (imageio) tại: {alt} (không có ffprobe) -> dùng PATH")
+    except Exception:
+        print("[ffmpeg] Không thấy ffmpeg/ffprobe trong PATH.")
+    return None
 
-FFMPEG_DIR = None
-try:
-    import imageio_ffmpeg
-    FFMPEG_DIR = str(Path(imageio_ffmpeg.get_ffmpeg_exe()).parent)
-    print(f"[ffmpeg] Dùng ffmpeg portable: {FFMPEG_DIR}")
-except Exception:
-    bin_path = shutil.which("ffmpeg")
-    if bin_path:
-        FFMPEG_DIR = str(Path(bin_path).parent)
-        print(f"[ffmpeg] Dùng ffmpeg hệ thống: {FFMPEG_DIR}")
-    else:
-        print("[ERROR] Không tìm thấy ffmpeg. Hãy để imageio-ffmpeg trong requirements.txt.")
-        sys.exit(1)
+FFMPEG_DIR = _resolve_ffmpeg_dir()
+
+import yt_dlp  # sau khi xác định FFMPEG_DIR
 
 # -------- Google Drive --------
 from googleapiclient.discovery import build
@@ -128,7 +143,7 @@ def prepare_cookie_files(cookies_multi_path: Path) -> List[str]:
 COOKIE_FILES = prepare_cookie_files(COOKIES_MULTI)
 print(f"Cookies sets hợp lệ: {len(COOKIE_FILES)}" if COOKIE_FILES else "Không dùng cookies hoặc tất cả set không hợp lệ.")
 
-# -------- Build link list (và chỉ lấy 1 link) --------
+# -------- Build link list: chỉ lấy 1 link --------
 all_links  = read_lines_clean(LINKS)
 done_links = set(read_lines_clean(DALAY))
 seen, new_links = set(), []
@@ -136,7 +151,7 @@ for url in all_links:
     if url in done_links or url in seen: continue
     seen.add(url); new_links.append(url)
 print(f"Tổng: {len(all_links)} | Đã làm: {len(done_links)} | Mới sẽ xử lý: {len(new_links)}")
-run_list = new_links[:1]  # mỗi lần chạy 1 link
+run_list = new_links[:1]  # 1 link/run
 
 po_token = (os.environ.get("PO_TOKEN") or (PO_TOKEN_FILE.read_text(encoding="utf-8").strip() if PO_TOKEN_FILE.exists() else "")).strip()
 
@@ -226,7 +241,7 @@ def ensure_folder_by_id(service, folder_id: str) -> Optional[str]:
             fileId=folder_id, fields="id,name,driveId", supportsAllDrives=True
         ).execute()
         print(f"[Drive] Dùng folder: {meta.get('name')} ({meta.get('id')})")
-        # cảnh báo khi dùng SA + My Drive (không có driveId → không quota)
+        # cảnh báo: SA + My Drive (không có driveId) → không có quota
         creds = service._http.credentials
         using_sa = getattr(creds, "service_account_email", None) is not None
         if using_sa and not meta.get("driveId"):
@@ -278,8 +293,9 @@ BASE_YDL_OPTS = {
     "fragment_retries": 3,
     "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"},
     "force_ipv4": True,
-    "ffmpeg_location": FFMPEG_DIR,
 }
+if FFMPEG_DIR:
+    BASE_YDL_OPTS["ffmpeg_location"] = FFMPEG_DIR  # chỉ set khi có đủ ffmpeg & ffprobe cùng thư mục
 
 ROTATE_TRIGGERS = (
     "Sign in to confirm you’re not a bot",
@@ -314,8 +330,7 @@ def _ydl_opts_with_client(base_opts: dict, player_clients: list, cookiefile: Opt
 def try_download_with_cookies(url: str) -> Tuple[bool, Optional[str], Optional[Path]]:
     """
     Trả về (ok, err, file_path).
-    Luôn thử đủ các client trong CÙNG cookie set (kể cả 'android') TRƯỚC khi xoay qua cookie khác
-    để né gate/SABR 403 trên web client.
+    Luôn thử đủ client trong CÙNG cookie set TRƯỚC khi xoay sang cookie khác (né SABR/403).
     """
     global last_good_cookie_idx
     order = list(range(len(COOKIE_FILES))) if COOKIE_FILES else [None]
@@ -329,29 +344,27 @@ def try_download_with_cookies(url: str) -> Tuple[bool, Optional[str], Optional[P
         cookiefile = COOKIE_FILES[ck_idx] if ck_idx is not None else None
         if cookiefile:
             print(f"   -> thử cookie set #{ck_idx}")
-            plans = [["web"], ["web_embedded"], ["android"]]  # có cookie
+            plans = [["web"], ["web_embedded"], ["android"]]
         else:
-            plans = [["android"], ["web"], ["web_embedded"]]  # ẩn danh
+            plans = [["android"], ["web"], ["web_embedded"]]
 
         for pcs in plans:
             try:
                 ydl_opts = _ydl_opts_with_client(BASE_YDL_OPTS, pcs, cookiefile, po_token)
-                before = set(p for p in OUT_DIR.glob("*.m4a"))
+                before = set(OUT_DIR.glob("*.m4a"))
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
-                after = set(p for p in OUT_DIR.glob("*.m4a"))
+                after = set(OUT_DIR.glob("*.m4a"))
                 new_files = sorted(list(after - before), key=lambda p: p.stat().st_mtime, reverse=True)
                 latest_file = new_files[0] if new_files else (sorted(list(after), key=lambda p: p.stat().st_mtime, reverse=True)[0] if after else None)
                 if ck_idx is not None:
                     last_good_cookie_idx = ck_idx
                 return True, None, latest_file
             except Exception as e:
-                msg = str(e)
-                last_err = msg
-                # Dù là 403/429/trigger → vẫn tiếp tục thử client kế tiếp TRONG cùng cookie set
+                last_err = str(e)
+                # Dù 403/429/... vẫn thử client kế tiếp trong cùng cookie
                 continue
 
-        # hết clients cho cookie này → chuyển cookie khác
     return False, (last_err or "Blocked/failed on all cookie sets/clients."), latest_file
 
 # -------- Main --------
@@ -371,7 +384,7 @@ if not run_list:
         except Exception as e:
             print(f"[Drive] Smoke test lỗi: {e}")
 
-for i, url in enumerate(run_list, 1):  # chỉ 1 link/lần chạy
+for i, url in enumerate(run_list, 1):  # chỉ 1 link
     print(f"\n[{i}/{len(run_list)}] Download M4A: {url}")
     ok, err, fpath = try_download_with_cookies(url)
     if ok:
