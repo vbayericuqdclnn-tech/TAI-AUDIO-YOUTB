@@ -389,8 +389,14 @@ for i, url in enumerate(run_list, 1):
 
         # Chỉ khi tải và upload (nếu có) thành công mới ghi log và tính là success
         if upload_success:
-            DALAY.open("a", encoding="utf-8").write(url + "\n")
-            success.append(url)
+            print(f"    -> Ghi nhận thành công, thêm link vào dalay.txt")
+            try:
+                with DALAY.open("a", encoding="utf-8") as f:
+                    f.write(url + "\n")
+                success.append(url)
+            except Exception as e:
+                print(f"    [ERROR] Ghi vào dalay.txt thất bại: {e}")
+                failed.append((url, f"Failed to write to dalay.txt: {e}"))
     else:
         failed.append((url, err))
         print(f" -> Tải về FAIL: {err}")
