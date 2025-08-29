@@ -1,11 +1,10 @@
-name: YouTube Audio → Drive (chạy đến khi hết links.txt)
+name: YouTube Audio → Drive (Manual Run)
 
 on:
   workflow_dispatch: {}
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
   group: yt-audio-drive
@@ -14,20 +13,17 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Tăng thời gian nếu danh sách rất dài; GitHub-hosted runner thường giới hạn tối đa ~6h/job.
-    timeout-minutes: 360
+    timeout-minutes: 360 # Tăng thời gian chờ cho các danh sách dài
     env:
       # --- ĐÍCH ---
       GDRIVE_FOLDER_ID: "1V9qkTesXnogNiTPUvDZOwJPj4Op4lTHF"
-      # Ưu tiên OAuth (tránh quota SA ở My Drive)
       GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
-      # Fallback SA (nếu không có OAuth)
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
       # --- DL ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
       SLEEP_SECONDS: "5"
-      MAX_PER_RUN: "100"  # script của bạn sẽ xử lý tối đa N link mỗi lượt gọi
+      MAX_PER_RUN: "99999"  # <<< Xử lý tất cả link trong một lần chạy
 
     steps:
       - name: Checkout
@@ -63,42 +59,12 @@ jobs:
           sed -n '1,10p' data/links.txt | nl -ba || true
           echo "done lines: $(wc -l < data/dalay.txt || echo 0)"
 
-      - name: Run downloader liên tục đến khi hết link
+      - name: Run downloader (all links, upload to Drive)
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONUTF8: "1"
         run: |
-          set -e
-          count_remain () {
-            bash -lc '
-              grep -Ev "^\s*(#|$)" data/links.txt | sort > /tmp/all || true
-              grep -Ev "^\s*(#|$)" data/dalay.txt | sort > /tmp/done || true
-              comm -23 /tmp/all /tmp/done | wc -l
-            '
-          }
-          nochange=0
-          prev=$(count_remain)
-          echo "Remaining (start): $prev"
-          while [ "$prev" -gt 0 ]; do
-            echo "::group::Run downloader (batch up to ${MAX_PER_RUN:-100})"
-            python -u scripts/yt_audio_to_drive.py || true
-            echo "::endgroup::"
-            sleep "${SLEEP_SECONDS:-5}"
-            cur=$(count_remain)
-            echo "Remaining (after batch): $cur"
-            if [ "$cur" -ge "$prev" ]; then
-              nochange=$((nochange+1))
-            else
-              nochange=0
-            fi
-            # tránh vòng lặp vô hạn khi link lỗi liên tục:
-            if [ "$nochange" -ge 3 ]; then
-              echo "Không tiến triển sau 3 vòng lặp. Dừng để tránh loop vô hạn."
-              break
-            fi
-            prev="$cur"
-          done
-          echo "Hoàn tất: không còn link mới cần xử lý hoặc không tiến triển."
+          python -u scripts/yt_audio_to_drive.py
 
       - name: Commit updated dalay.txt (if changed)
         run: |
