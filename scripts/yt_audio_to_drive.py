@@ -393,6 +393,10 @@ for i, url in enumerate(run_list, 1):
             try:
                 with DALAY.open("a", encoding="utf-8") as f:
                     f.write(url + "\n")
+                    # --- FIX: Ép ghi file ngay lập tức ---
+                    f.flush()
+                    os.fsync(f.fileno())
+                    # ------------------------------------
                 success.append(url)
             except Exception as e:
                 print(f"    [ERROR] Ghi vào dalay.txt thất bại: {e}")
