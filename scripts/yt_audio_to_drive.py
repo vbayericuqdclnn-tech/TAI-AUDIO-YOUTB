@@ -373,7 +373,6 @@ for i, url in enumerate(run_list, 1):
         print(" -> Tải về OK")
         upload_success = False
         
-        # Nếu có cấu hình Drive và có file để upload
         if drive_service and resolved_folder_id and fpath and fpath.exists():
             try:
                 fid, action = drive_upload_file(drive_service, fpath, resolved_folder_id)
@@ -384,23 +383,11 @@ for i, url in enumerate(run_list, 1):
                 print(f"    [Drive] Upload lỗi: {ue}")
                 failed.append((url, f"Upload failed: {ue}"))
         else:
-            # Không có Drive hoặc không có file -> coi như thành công (chỉ tải về)
             upload_success = True
 
-        # Chỉ khi tải và upload (nếu có) thành công mới ghi log và tính là success
         if upload_success:
-            print(f"    -> Ghi nhận thành công, thêm link vào dalay.txt")
-            try:
-                with DALAY.open("a", encoding="utf-8") as f:
-                    f.write(url + "\n")
-                    # --- FIX: Ép ghi file ngay lập tức ---
-                    f.flush()
-                    os.fsync(f.fileno())
-                    # ------------------------------------
-                success.append(url)
-            except Exception as e:
-                print(f"    [ERROR] Ghi vào dalay.txt thất bại: {e}")
-                failed.append((url, f"Failed to write to dalay.txt: {e}"))
+            print(f"    -> Ghi nhận thành công, sẽ cập nhật dalay.txt sau khi hoàn tất.")
+            success.append(url)
     else:
         failed.append((url, err))
         print(f" -> Tải về FAIL: {err}")
@@ -409,6 +396,20 @@ for i, url in enumerate(run_list, 1):
         for t in range(SLEEP_SECONDS, 0, -1):
             print(f"   Nghỉ {t}s...", end="\r"); time.sleep(1)
         print(" " * 24, end="\r")
+
+# --- CẬP NHẬT dalay.txt MỘT LẦN DUY NHẤT SAU KHI KẾT THÚC ---
+if success:
+    print(f"\nCập nhật dalay.txt với {len(success)} link mới...")
+    try:
+        # Đọc lại các link đã có để tránh ghi đè mất mát
+        existing_done_links = set(read_lines_clean(DALAY))
+        # Thêm các link mới xử lý thành công
+        all_done_links = existing_done_links.union(set(success))
+        # Ghi lại toàn bộ file với danh sách đầy đủ, đã sắp xếp
+        DALAY.write_text("\n".join(sorted(list(all_done_links))) + "\n", encoding="utf-8")
+        print(" -> Cập nhật dalay.txt thành công.")
+    except Exception as e:
+        print(f" [ERROR] Cập nhật dalay.txt thất bại: {e}")
 
 if drive_service and resolved_folder_id and DALAY.exists():
     try:
