@@ -5,7 +5,8 @@
 # - Upload Drive: ƯU TIÊN OAuth (GDRIVE_OAUTH_TOKEN_JSON), fallback SA (GDRIVE_SA_JSON)
 # - Full Drive scope; fix ffmpeg/ffprobe; unbuffered logs
 
-import os, sys, re, json, time, shutil, tempfile
+import os, sys, re, json, time, shutil, tempfile, io
+import fcntl
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -64,10 +65,56 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
+# --------------------------- tiện ích I/O an toàn cho dalay.txt ---------------------------
+def _ensure_file(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("", encoding="utf-8")
+
+def _locked_append_line(path: Path, line: str):
+    """Append một dòng vào file với file-lock + fsync để tránh mất log khi runner dừng đột ngột."""
+    _ensure_file(path)
+    line = line.rstrip("\n")
+    with open(path, "a+", encoding="utf-8") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            pass
+        # chống trùng trong cùng process
+        f.seek(0, io.SEEK_SET)
+        exists = any(l.strip() == line for l in f.readlines())
+        if not exists:
+            f.seek(0, io.SEEK_END)
+            f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+
 def read_lines_clean(p: Path) -> List[str]:
     if not p.exists(): return []
     lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
     return [ln for ln in lines if ln and not ln.startswith("#")]
+
+def dedupe_dalay_against_links():
+    """Đồng bộ dalay.txt với links.txt: bỏ trùng, chỉ giữ các dòng có trong links.txt và theo đúng thứ tự của links.txt."""
+    all_links = [x for x in read_lines_clean(LINKS)]
+    done_set  = set(read_lines_clean(DALAY))
+    filtered  = [u for u in all_links if u in done_set]
+    _ensure_file(DALAY)
+    tmp = DALAY.with_suffix(".txt.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        for u in filtered:
+            f.write(u + "\n")
+    os.replace(tmp, DALAY)
+
+def log_done(original_url: str):
+    """Ghi ngay khi hoàn tất (xem logic gọi phía dưới). Ghi đúng chuỗi URL từ links.txt để comm -23 khớp tuyệt đối."""
+    _locked_append_line(DALAY, original_url.strip())
+
+# -----------------------------------------------------------------------------------------
 
 def _json_cookie_to_netscape_lines(js_text: str):
     try:
@@ -134,6 +181,7 @@ def prepare_cookie_files(cookies_multi_path: Path) -> List[str]:
 COOKIE_FILES = prepare_cookie_files(COOKIES_MULTI)
 print(f"Cookies sets hợp lệ: {len(COOKIE_FILES)}" if COOKIE_FILES else "Không dùng cookies hoặc tất cả set không hợp lệ.")
 
+# --- Chuẩn bị danh sách run ---
 all_links  = read_lines_clean(LINKS)
 done_links = set(read_lines_clean(DALAY))
 seen, new_links = set(), []
@@ -281,7 +329,6 @@ BASE_YDL_OPTS = {
     "force_ipv4": True,
 }
 if _resolve_ffmpeg_dir():
-    # Gọi lại để đảm bảo đúng trạng thái cuối (đã in log ở trên); chỉ set khi đủ cặp ffmpeg+ffprobe
     FFMPEG_DIR2 = _resolve_ffmpeg_dir()
     if FFMPEG_DIR2:
         BASE_YDL_OPTS["ffmpeg_location"] = FFMPEG_DIR2
@@ -371,16 +418,29 @@ for i, url in enumerate(run_list, 1):
     print(f"\n[{i}/{len(run_list)}] Download M4A: {url}")
     ok, err, fpath = try_download_with_cookies(url)
     if ok:
-        DALAY.open("a", encoding="utf-8").write(url + "\n")
-        success.append(url)
         print(" -> OK")
+        logged = False
+
+        # Nếu có cấu hình Drive, chỉ ghi dalay khi UPLOAD THÀNH CÔNG
         if drive_service and resolved_folder_id and fpath and fpath.exists():
             try:
                 fid, action = drive_upload_file(drive_service, fpath, resolved_folder_id)
                 uploaded.append((fpath.name, action, fid))
                 print(f"    [Drive] {action}: {fpath.name} ({fid})")
+                log_done(url)           # <-- Ghi chắc chắn sau khi upload thành công
+                logged = True
             except Exception as ue:
                 print(f"    [Drive] Upload lỗi: {ue}")
+
+        # Nếu KHÔNG cấu hình Drive (service/folder thiếu) → cho phép log sau khi tải OK
+        if not logged and (not drive_service or not resolved_folder_id):
+            log_done(url)
+            logged = True
+
+        # Nếu có Drive nhưng upload lỗi → KHÔNG ghi để lần sau chạy lại.
+
+        success.append(url)
+
     else:
         failed.append((url, err))
         print(f" -> FAIL: {err}")
@@ -389,6 +449,9 @@ for i, url in enumerate(run_list, 1):
         for t in range(SLEEP_SECONDS, 0, -1):
             print(f"   Nghỉ {t}s...", end="\r"); time.sleep(1)
         print(" " * 24, end="\r")
+
+# Đồng bộ và chống trùng sau batch
+dedupe_dalay_against_links()
 
 if drive_service and resolved_folder_id and DALAY.exists():
     try:
