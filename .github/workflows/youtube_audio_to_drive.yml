@@ -1,14 +1,11 @@
-name: YouTube Audio → Drive (10 links/run, ~2min cadence)
+name: YouTube Audio → Drive (chạy đến khi hết links.txt)
 
 on:
   workflow_dispatch: {}
-  # GitHub chỉ cho schedule tối thiểu 5 phút
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
 
 permissions:
   contents: write
-  actions: write   # cần để createWorkflowDispatch
+  actions: write
 
 concurrency:
   group: yt-audio-drive
@@ -17,7 +14,8 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # Tăng thời gian nếu danh sách rất dài; GitHub-hosted runner thường giới hạn tối đa ~6h/job.
+    timeout-minutes: 360
     env:
       # --- ĐÍCH ---
       GDRIVE_FOLDER_ID: "1V9qkTesXnogNiTPUvDZOwJPj4Op4lTHF"
@@ -29,12 +27,7 @@ jobs:
       # --- DL ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
       SLEEP_SECONDS: "5"
-      MAX_PER_RUN: "100"  # <<< xử lý 100 link mỗi lần chạy
-
-      # --- AUTO RE-DISPATCH CÁCH 2 PHÚT ---
-      ENABLE_SELF_DISPATCH: "true"
-      REDISPATCH_DELAY_SEC: "120"  # 2 phút
-      MAX_REDISPATCH: "1"          # an toàn: mỗi run chỉ tự gọi lại tối đa 1 lần
+      MAX_PER_RUN: "100"  # script của bạn sẽ xử lý tối đa N link mỗi lượt gọi
 
     steps:
       - name: Checkout
@@ -70,12 +63,42 @@ jobs:
           sed -n '1,10p' data/links.txt | nl -ba || true
           echo "done lines: $(wc -l < data/dalay.txt || echo 0)"
 
-      - name: Run downloader (10 links, upload thẳng Drive)
+      - name: Run downloader liên tục đến khi hết link
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONUTF8: "1"
         run: |
-          python -u scripts/yt_audio_to_drive.py
+          set -e
+          count_remain () {
+            bash -lc '
+              grep -Ev "^\s*(#|$)" data/links.txt | sort > /tmp/all || true
+              grep -Ev "^\s*(#|$)" data/dalay.txt | sort > /tmp/done || true
+              comm -23 /tmp/all /tmp/done | wc -l
+            '
+          }
+          nochange=0
+          prev=$(count_remain)
+          echo "Remaining (start): $prev"
+          while [ "$prev" -gt 0 ]; do
+            echo "::group::Run downloader (batch up to ${MAX_PER_RUN:-100})"
+            python -u scripts/yt_audio_to_drive.py || true
+            echo "::endgroup::"
+            sleep "${SLEEP_SECONDS:-5}"
+            cur=$(count_remain)
+            echo "Remaining (after batch): $cur"
+            if [ "$cur" -ge "$prev" ]; then
+              nochange=$((nochange+1))
+            else
+              nochange=0
+            fi
+            # tránh vòng lặp vô hạn khi link lỗi liên tục:
+            if [ "$nochange" -ge 3 ]; then
+              echo "Không tiến triển sau 3 vòng lặp. Dừng để tránh loop vô hạn."
+              break
+            fi
+            prev="$cur"
+          done
+          echo "Hoàn tất: không còn link mới cần xử lý hoặc không tiến triển."
 
       - name: Commit updated dalay.txt (if changed)
         run: |
@@ -88,50 +111,3 @@ jobs:
             git commit -m "chore: update dalay.txt (YouTube audio processed)"
             git push
           fi
-
-      # Tự gọi lại workflow sau 2 phút nếu còn link - vượt hạn schedule 5 phút
-      - name: Self re-dispatch after delay (if pending)
-        if: ${{ env.ENABLE_SELF_DISPATCH == 'true' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { execSync } = require('child_process');
-            const delaySec = parseInt(process.env.REDISPATCH_DELAY_SEC || '120', 10);
-            const maxRedispatch = parseInt(process.env.MAX_REDISPATCH || '1', 10);
-            function pendingCount() {
-              try {
-                const cmd = `
-                  bash -lc '
-                    grep -Ev "^\\s*(#|$)" data/links.txt | sort > /tmp/all || true
-                    grep -Ev "^\\s*(#|$)" data/dalay.txt | sort > /tmp/done || true
-                    comm -23 /tmp/all /tmp/done | wc -l
-                  '
-                `;
-                return parseInt(execSync(cmd, {stdio: ['ignore','pipe','pipe']}).toString().trim(), 10) || 0;
-              } catch (e) { return 0; }
-            }
-            const remain = pendingCount();
-            core.info(`Remaining links: ${remain}`);
-            if (remain <= 0) {
-              core.info('No remaining links. Skip redispatch.');
-              return;
-            }
-            // chống vòng lặp vô hạn: chỉ cho phép tự gọi lại tối đa N lần
-            const countKey = 'REDISPATCH_COUNT';
-            let cnt = parseInt(process.env[countKey] || '0', 10);
-            if (cnt >= maxRedispatch) {
-              core.info(`Reached MAX_REDISPATCH=${maxRedispatch}. Not redispatching.`);
-              return;
-            }
-            core.info(`Sleeping ${delaySec}s before redispatch...`);
-            await new Promise(r => setTimeout(r, delaySec * 1000));
-            const newCnt = String(cnt + 1);
-            core.info(`Redispatching (count=${newCnt}) ...`);
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: process.env.GITHUB_WORKFLOW,   // chính workflow hiện tại
-              ref: context.ref,
-              inputs: {}
-            });
-            core.info('Dispatched new run.')
