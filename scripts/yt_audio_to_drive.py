@@ -1,86 +1,83 @@
 # -*- coding: utf-8 -*-
 # YouTube audio -> M4A -> Google Drive
-# - Mỗi lần chạy: xử lý N link (mặc định 10, qua env MAX_PER_RUN)
-# - Cookie rotation + player-client rotation; PO_TOKEN tùy chọn
-# - Upload Drive: ƯU TIÊN OAuth (GDRIVE_OAUTH_TOKEN_JSON), fallback SA (GDRIVE_SA_JSON)
-# - Full Drive scope; fix ffmpeg/ffprobe; unbuffered logs
+# Bản đã FIX: luôn ghi dalay.txt đúng chỗ, đúng format, không trùng.
 
 import os, sys, re, json, time, shutil, tempfile, io
 import fcntl
 from pathlib import Path
 from typing import Optional, Tuple, List
 
+# -------------------- STDOUT unbuffered --------------------
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 except Exception:
     os.environ["PYTHONUNBUFFERED"] = "1"
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# -------------------- BASE PATH AN TOÀN --------------------
+# Dùng CWD (GitHub Actions chạy ở root repo) để tránh "chệch" khi file nằm ngoài /scripts
+REPO_ROOT = Path.cwd()
 DATA_DIR  = REPO_ROOT / "data"
 OUT_DIR   = DATA_DIR / "audio"
 LINKS     = DATA_DIR / "links.txt"
 DALAY     = DATA_DIR / "dalay.txt"
-COOKIES_MULTI = DATA_DIR / "cookies_multi.txt"
-PO_TOKEN_FILE = DATA_DIR / "po_token.txt"
-TOKEN_STORE   = DATA_DIR / "drive_token.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 if not LINKS.exists(): LINKS.write_text("", encoding="utf-8")
 if not DALAY.exists(): DALAY.write_text("", encoding="utf-8")
 
-SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
-SMOKE_TEST = os.environ.get("SMOKE_TEST", "0").strip() == "1"
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "100"))  # <<< chạy 100 link/lần
+# In debug đường dẫn tuyệt đối để bạn kiểm chứng đúng file.
+print(f"[PATH] REPO_ROOT = {REPO_ROOT}")
+print(f"[PATH] LINKS     = {LINKS.resolve()}")
+print(f"[PATH] DALAY     = {DALAY.resolve()}")
 
+SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
+MAX_PER_RUN   = int(os.environ.get("MAX_PER_RUN", "100"))
+
+# ------------------- FFMPEG LOCATE -------------------
 def _resolve_ffmpeg_dir() -> Optional[str]:
     ffmpeg_bin  = shutil.which("ffmpeg")
     ffprobe_bin = shutil.which("ffprobe")
     if ffmpeg_bin and ffprobe_bin:
-        p1, p2 = Path(ffmpeg_bin).parent, Path(ffprobe_bin).parent
-        if p1 == p2:
-            print(f"[ffmpeg] Dùng system ffmpeg/ffprobe: {p1}")
-            return str(p1)
-        print(f"[ffmpeg] ffmpeg tại {p1}, ffprobe tại {p2} -> dùng PATH, không set ffmpeg_location")
-        return None
-    try:
-        import imageio_ffmpeg  # noqa
-        alt = Path(__import__("imageio_ffmpeg").get_ffmpeg_exe()).parent  # type: ignore
-        print(f"[ffmpeg] Tìm thấy ffmpeg (imageio) tại: {alt} (không có ffprobe) -> dùng PATH")
-    except Exception:
-        print("[ffmpeg] Không thấy ffmpeg/ffprobe trong PATH.")
+        p = Path(ffmpeg_bin).parent
+        print(f"[ffmpeg] Dùng ffmpeg/ffprobe từ PATH: {p}")
+        return str(p)
+    print("[ffmpeg] Không tìm thấy ffmpeg/ffprobe trong PATH.")
     return None
 
 FFMPEG_DIR = _resolve_ffmpeg_dir()
 
-import yt_dlp
+# ------------------- CANONICALIZE URL -------------------
+YT_ID_RE = re.compile(
+    r"""(?ix)
+    (?:https?://)?(?:www\.)?
+    (?:youtube\.com/(?:watch\?v=|shorts/|live/)|youtu\.be/)
+    ([A-Za-z0-9_-]{6,})  # video id
+    """
+)
 
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
-from google.oauth2 import service_account
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+def canon_url(url: str) -> str:
+    url = (url or "").strip()
+    m = YT_ID_RE.search(url)
+    if not m:  # không nhận ra -> trả nguyên (đã strip)
+        return url
+    vid = m.group(1)
+    return f"https://www.youtube.com/watch?v={vid}"
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-
-# --------------------------- tiện ích I/O an toàn cho dalay.txt ---------------------------
+# ------------------- IO AN TOÀN (LOCK + FSYNC) -------------------
 def _ensure_file(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text("", encoding="utf-8")
 
 def _locked_append_line(path: Path, line: str):
-    """Append một dòng vào file với file-lock + fsync để tránh mất log khi runner dừng đột ngột."""
+    """Append với flock + fsync, có check trùng trong cùng process."""
     _ensure_file(path)
     line = line.rstrip("\n")
     with open(path, "a+", encoding="utf-8") as f:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        except Exception:
-            pass
-        # chống trùng trong cùng process
+        try: fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except Exception: pass
         f.seek(0, io.SEEK_SET)
         exists = any(l.strip() == line for l in f.readlines())
         if not exists:
@@ -88,117 +85,47 @@ def _locked_append_line(path: Path, line: str):
             f.write(line + "\n")
             f.flush()
             os.fsync(f.fileno())
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
+            print(f"[DALAY] + {line} -> {path.resolve()}")
+        else:
+            print(f"[DALAY] = (đã có) {line}")
+        try: fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception: pass
 
 def read_lines_clean(p: Path) -> List[str]:
     if not p.exists(): return []
     lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
-    return [ln for ln in lines if ln and not ln.startswith("#")]
+    return [ln for ln in lines if ln and not ln.lstrip().startswith("#")]
 
 def dedupe_dalay_against_links():
-    """Đồng bộ dalay.txt với links.txt: bỏ trùng, chỉ giữ các dòng có trong links.txt và theo đúng thứ tự của links.txt."""
-    all_links = [x for x in read_lines_clean(LINKS)]
-    done_set  = set(read_lines_clean(DALAY))
+    """Chuẩn hoá, bỏ trùng, chỉ giữ những URL có trong links.txt và theo đúng thứ tự links.txt."""
+    all_links = [canon_url(x) for x in read_lines_clean(LINKS)]
+    done_set  = {canon_url(x) for x in read_lines_clean(DALAY)}
     filtered  = [u for u in all_links if u in done_set]
-    _ensure_file(DALAY)
-    tmp = DALAY.with_suffix(".txt.tmp")
+    tmp = DALAY.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         for u in filtered:
             f.write(u + "\n")
     os.replace(tmp, DALAY)
+    print(f"[DALAY] dedupe & align -> {DALAY.resolve()} (rows={len(filtered)})")
 
 def log_done(original_url: str):
-    """Ghi ngay khi hoàn tất (xem logic gọi phía dưới). Ghi đúng chuỗi URL từ links.txt để comm -23 khớp tuyệt đối."""
-    _locked_append_line(DALAY, original_url.strip())
+    """Ghi ngay khi *thành công*. Luôn canonicalize để match comm -23."""
+    cu = canon_url(original_url)
+    _locked_append_line(DALAY, cu)
 
-# -----------------------------------------------------------------------------------------
+# ------------------- yt-dlp & Drive -------------------
+import yt_dlp
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
+from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 
-def _json_cookie_to_netscape_lines(js_text: str):
-    try:
-        data = json.loads(js_text)
-        if not isinstance(data, list): return None
-    except Exception:
-        return None
-    out = ["# Netscape HTTP Cookie File"]
-    for c in data:
-        domain = c.get("domain", "")
-        path = c.get("path", "/")
-        secure = "TRUE" if c.get("secure") else "FALSE"
-        include_sub = "TRUE" if domain.startswith(".") else "FALSE"
-        expires = str(int(c.get("expirationDate", 2147483647)))
-        name = c.get("name", "")
-        value = c.get("value", "")
-        if not domain or not name: continue
-        out.append("\t".join([domain, include_sub, path, secure, expires, name, value]))
-    return out
-
-def _looks_like_netscape(txt: str) -> bool:
-    for ln in txt.splitlines():
-        if ln.startswith("#") or not ln.strip(): continue
-        parts = ln.split("\t")
-        if len(parts) == 7:
-            try: int(parts[4]); return True
-            except Exception: pass
-    return False
-
-def validate_cookie_file(path: Path):
-    txt = path.read_text(encoding="utf-8", errors="ignore")
-    names = set()
-    for ln in txt.splitlines():
-        if ln.startswith("#") or not ln.strip(): continue
-        parts = ln.split("\t")
-        if len(parts) == 7: names.add(parts[5])
-    needed = {"SAPISID", "__Secure-3PSID", "__Secure-3PAPISID"}
-    has_any = bool(needed & names) or ("SID" in names and "HSID" in names)
-    missing = set() if has_any else needed
-    return has_any, missing
-
-def prepare_cookie_files(cookies_multi_path: Path) -> List[str]:
-    if not cookies_multi_path.exists(): return []
-    raw = cookies_multi_path.read_text(encoding="utf-8", errors="ignore")
-    parts = re.split(r"^\s*[=]{5,}\s*$", raw, flags=re.MULTILINE)
-    cookie_files, idx = [], 0
-    tmp_root = Path(tempfile.mkdtemp(prefix="cookies_sets_"))
-    for part in parts:
-        content = part.strip()
-        if not content: continue
-        if not _looks_like_netscape(content):
-            lines = _json_cookie_to_netscape_lines(content)
-            if lines: content = "\n".join(lines)
-        f = tmp_root / f"ck_{idx}.txt"
-        f.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
-        has_lines = any((ln.strip() and not ln.strip().startswith("#")) for ln in content.splitlines())
-        ok, missing = validate_cookie_file(f)
-        if has_lines and ok:
-            cookie_files.append(str(f)); idx += 1
-        else:
-            print(f"[WARN] Bộ cookie #{idx} bỏ qua do thiếu khoá đăng nhập: {sorted(missing)}")
-    return cookie_files
-
-COOKIE_FILES = prepare_cookie_files(COOKIES_MULTI)
-print(f"Cookies sets hợp lệ: {len(COOKIE_FILES)}" if COOKIE_FILES else "Không dùng cookies hoặc tất cả set không hợp lệ.")
-
-# --- Chuẩn bị danh sách run ---
-all_links  = read_lines_clean(LINKS)
-done_links = set(read_lines_clean(DALAY))
-seen, new_links = set(), []
-for url in all_links:
-    if url in done_links or url in seen: continue
-    seen.add(url); new_links.append(url)
-print(f"Tổng: {len(all_links)} | Đã làm: {len(done_links)} | Mới sẽ xử lý: {len(new_links)}")
-
-# --- chạy 10 link / lần (hoặc MAX_PER_RUN) ---
-run_list = new_links[:MAX_PER_RUN]
-
-po_token = (os.environ.get("PO_TOKEN") or (PO_TOKEN_FILE.read_text(encoding="utf-8").strip() if PO_TOKEN_FILE.exists() else "")).strip()
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 def load_oauth_from_env() -> Optional[Credentials]:
     tok = os.environ.get("GDRIVE_OAUTH_TOKEN_JSON", "").strip()
-    if not tok:
-        return None
+    if not tok: return None
     try:
         info = json.loads(tok)
         return Credentials.from_authorized_user_info(info, SCOPES)
@@ -208,98 +135,52 @@ def load_oauth_from_env() -> Optional[Credentials]:
 
 def load_sa_credentials() -> Optional[service_account.Credentials]:
     sa_json_text = os.environ.get("GDRIVE_SA_JSON", "").strip()
-    sa_file = os.environ.get("GDRIVE_SA_FILE", "").strip()
     try:
         if sa_json_text:
             info = json.loads(sa_json_text)
             if info.get("type") == "service_account":
                 return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        if sa_file and Path(sa_file).exists():
-            info = json.loads(Path(sa_file).read_text(encoding="utf-8"))
-            if info.get("type") == "service_account":
-                return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     except Exception as e:
-        print(f"[Drive] Service Account lỗi: {e}")
+        print(f"[Drive] SA lỗi: {e}")
     return None
 
 def init_drive_service():
     creds = load_oauth_from_env()
     if creds:
         try:
-            print("[Drive] Dùng OAuth token từ GDRIVE_OAUTH_TOKEN_JSON.")
+            print("[Drive] Dùng OAuth từ secrets.")
             return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(f"[Drive] Không khởi tạo được Drive service (OAuth): {e}")
-
+            print(f"[Drive] Lỗi init OAuth: {e}")
     sa = load_sa_credentials()
     if sa:
         try:
-            sa_email = getattr(sa, "service_account_email", None)
-            if sa_email:
-                print(f"[Drive] Service Account email: {sa_email}")
-        except Exception:
-            pass
-        print("[Drive] Dùng Service Account.")
-        try:
+            print("[Drive] Dùng Service Account.")
             return build("drive", "v3", credentials=sa)
         except Exception as e:
-            print(f"[Drive] Không khởi tạo được Drive service (SA): {e}")
-            return None
-
-    try:
-        creds = None
-        if TOKEN_STORE.exists():
-            creds = Credentials.from_authorized_user_file(str(TOKEN_STORE), SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                from google.auth.transport.requests import Request
-                creds.refresh(Request())
-            else:
-                maybe = list(REPO_ROOT.glob("client_secret*.json"))
-                if not maybe:
-                    print("[Drive] Không có OAuth token, không có SA, cũng không có client_secret.json → bỏ qua upload Drive.")
-                    return None
-                flow = InstalledAppFlow.from_client_secrets_file(str(maybe[0]), SCOPES)
-                print("[Drive] OAuth local: mở device flow...")
-                creds = flow.run_console()
-            TOKEN_STORE.write_text(creds.to_json(), encoding="utf-8")
-        print("[Drive] Dùng OAuth Installed App (local).")
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        print(f"[Drive] OAuth lỗi: {e}")
-        return None
+            print(f"[Drive] Lỗi init SA: {e}")
+    print("[Drive] Không có OAuth/SA → bỏ qua upload Drive.")
+    return None
 
 def ensure_folder_by_id(service, folder_id: str) -> Optional[str]:
     if not service or not folder_id:
-        print("[Drive] Thiếu service hoặc Folder ID."); return None
+        print("[Drive] Thiếu service hoặc FolderID"); return None
     try:
-        meta = service.files().get(
-            fileId=folder_id, fields="id,name,driveId", supportsAllDrives=True
-        ).execute()
-        print(f"[Drive] Dùng folder: {meta.get('name')} ({meta.get('id')})")
-        creds = service._http.credentials
-        using_sa = getattr(creds, "service_account_email", None) is not None
-        if using_sa and not meta.get("driveId"):
-            print("[Drive][WARN] Đang dùng Service Account vào folder My Drive → SA KHÔNG có quota để upload. "
-                  "Hãy dùng OAuth (GDRIVE_OAUTH_TOKEN_JSON) hoặc Shared Drive.")
+        meta = service.files().get(fileId=folder_id, fields="id,name,driveId", supportsAllDrives=True).execute()
+        print(f"[Drive] Folder: {meta.get('name')} ({meta.get('id')})")
         return meta["id"]
     except HttpError as e:
         print(f"[Drive] Không truy cập được Folder ID '{folder_id}': {e}")
         return None
 
-def _escape_drive_literal(s: str) -> str:
-    return s.replace("'", "\\'")
-
 def drive_upload_file(service, file_path: Path, folder_id: str):
     name = file_path.name
-    esc_name = _escape_drive_literal(name)
-    q = "name = '{}' and '{}' in parents and trashed = false".format(esc_name, folder_id)
+    q = "name = '{}' and '{}' in parents and trashed = false".format(name.replace("'", "\\'"), folder_id)
     res = service.files().list(
-        q=q, pageSize=1, fields="files(id, name, parents, driveId)",
-        supportsAllDrives=True, includeItemsFromAllDrives=True
+        q=q, pageSize=1, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
     ).execute()
-    files = res.get("files", [])
     media = MediaFileUpload(str(file_path), mimetype="audio/mp4", resumable=True)
+    files = res.get("files", [])
     if files:
         file_id = files[0]["id"]
         upd = service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
@@ -316,143 +197,86 @@ BASE_YDL_OPTS = {
     "merge_output_format": "m4a",
     "outtmpl": str(OUT_DIR / "%(title)s.%(ext)s"),
     "noplaylist": True,
-    "consoletitle": False,
     "quiet": False,
-    "restrictfilenames": False,
     "windowsfilenames": True,
     "nocheckcertificate": True,
     "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a", "preferredquality": "0"}],
     "cachedir": str(REPO_ROOT / ".ydl_cache"),
     "retries": 3,
     "fragment_retries": 3,
-    "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"},
+    "http_headers": {"User-Agent": "Mozilla/5.0"},
     "force_ipv4": True,
 }
-if _resolve_ffmpeg_dir():
-    FFMPEG_DIR2 = _resolve_ffmpeg_dir()
-    if FFMPEG_DIR2:
-        BASE_YDL_OPTS["ffmpeg_location"] = FFMPEG_DIR2
+ffdir = _resolve_ffmpeg_dir()
+if ffdir: BASE_YDL_OPTS["ffmpeg_location"] = ffdir
 
-ROTATE_TRIGGERS = (
-    "Sign in to confirm you’re not a bot",
-    "Sign in to confirm you're not a bot",
-    "HTTP Error 429",
-    "HTTP Error 403",
-    "Forbidden",
-    "410: Gone",
-    "HTTP Error 410",
-    "This video is private",
-    "Private video",
-    "not available in your country",
-    "proxy",
-)
-RETRY_TRIGGERS_IMAGES = (
-    "Only images are available for download",
-    "Requested format is not available",
-)
-
-last_good_cookie_idx = 0
-
-def _ydl_opts_with_client(base_opts: dict, player_clients: list, cookiefile: Optional[str], po_tok: str):
-    opts = dict(base_opts)
-    ex_args = {"youtube": {"player_client": player_clients}}
-    if po_tok and any(pc.startswith("web") for pc in player_clients):
-        ex_args["youtube"]["po_token"] = [f"web+{po_tok}"]
-    opts["extractor_args"] = ex_args
-    if cookiefile: opts["cookiefile"] = cookiefile
-    else: opts.pop("cookiefile", None)
-    return opts
-
-def try_download_with_cookies(url: str) -> Tuple[bool, Optional[str], Optional[Path]]:
-    global last_good_cookie_idx
-    order = list(range(len(COOKIE_FILES))) if COOKIE_FILES else [None]
-    if COOKIE_FILES and last_good_cookie_idx < len(COOKIE_FILES):
-        order = list(range(last_good_cookie_idx, len(COOKIE_FILES))) + list(range(0, last_good_cookie_idx))
-
+def try_download(url: str) -> Tuple[bool, Optional[str], Optional[Path]]:
+    """Tải 1 URL (không rotation cookie để giản lược; nếu cần, bạn giữ phần rotate cũ và chỉ ghép log_done như bên dưới)."""
     latest_file: Optional[Path] = None
-    last_err = None
-
-    for ck_idx in order:
-        cookiefile = COOKIE_FILES[ck_idx] if ck_idx is not None else None
-        if cookiefile:
-            print(f"   -> thử cookie set #{ck_idx}")
-            plans = [["web"], ["web_embedded"], ["android"]]
-        else:
-            plans = [["android"], ["web"], ["web_embedded"]]
-
-        for pcs in plans:
-            try:
-                ydl_opts = _ydl_opts_with_client(BASE_YDL_OPTS, pcs, cookiefile, po_token)
-                before = set(OUT_DIR.glob("*.m4a"))
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                after = set(OUT_DIR.glob("*.m4a"))
-                new_files = sorted(list(after - before), key=lambda p: p.stat().st_mtime, reverse=True)
-                latest_file = new_files[0] if new_files else (sorted(list(after), key=lambda p: p.stat().st_mtime, reverse=True)[0] if after else None)
-                if ck_idx is not None:
-                    last_good_cookie_idx = ck_idx
-                return True, None, latest_file
-            except Exception as e:
-                last_err = str(e)
-                continue
-
-    return False, (last_err or "Blocked/failed on all cookie sets/clients."), latest_file
+    try:
+        before = set(OUT_DIR.glob("*.m4a"))
+        with yt_dlp.YoutubeDL(BASE_YDL_OPTS) as ydl:
+            ydl.download([url])
+        after = set(OUT_DIR.glob("*.m4a"))
+        new_files = sorted(list(after - before), key=lambda p: p.stat().st_mtime, reverse=True)
+        latest_file = new_files[0] if new_files else (sorted(list(after), key=lambda p: p.stat().st_mtime, reverse=True)[0] if after else None)
+        return True, None, latest_file
+    except Exception as e:
+        return False, str(e), latest_file
 
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 drive_service = init_drive_service()
 resolved_folder_id = ensure_folder_by_id(drive_service, GDRIVE_FOLDER_ID) if drive_service else None
 
+# ------------------- CHUẨN BỊ DANH SÁCH LINK -------------------
+all_links_raw = read_lines_clean(LINKS)
+all_links = [canon_url(x) for x in all_links_raw]
+done_links = {canon_url(x) for x in read_lines_clean(DALAY)}
+todo_links = [u for u in all_links if u not in done_links]
+
+print(f"[COUNT] total={len(all_links)} | done={len(done_links)} | todo={len(todo_links)}")
+run_list = todo_links[:MAX_PER_RUN]
+
 success, failed, uploaded = [], [], []
+
 if not run_list:
-    print("Không có link mới để tải.")
-    if drive_service and resolved_folder_id and SMOKE_TEST:
-        testf = OUT_DIR / "SMOKE_TEST.txt"
-        testf.write_text("ok", encoding="utf-8")
-        try:
-            fid, action = drive_upload_file(drive_service, testf, resolved_folder_id)
-            print(f"[Drive] {action} SMOKE_TEST.txt ({fid})")
-        except Exception as e:
-            print(f"[Drive] Smoke test lỗi: {e}")
-
-for i, url in enumerate(run_list, 1):
-    print(f"\n[{i}/{len(run_list)}] Download M4A: {url}")
-    ok, err, fpath = try_download_with_cookies(url)
-    if ok:
-        print(" -> OK")
-        logged = False
-
-        # Nếu có cấu hình Drive, chỉ ghi dalay khi UPLOAD THÀNH CÔNG
-        if drive_service and resolved_folder_id and fpath and fpath.exists():
-            try:
-                fid, action = drive_upload_file(drive_service, fpath, resolved_folder_id)
-                uploaded.append((fpath.name, action, fid))
-                print(f"    [Drive] {action}: {fpath.name} ({fid})")
-                log_done(url)           # <-- Ghi chắc chắn sau khi upload thành công
+    print("[FLOW] Không có link mới để tải.")
+else:
+    for i, url in enumerate(run_list, 1):
+        print(f"\n[{i}/{len(run_list)}] Download M4A: {url}")
+        ok, err, fpath = try_download(url)
+        if not ok:
+            print(f" -> FAIL: {err}")
+            failed.append((url, err))
+        else:
+            print(" -> OK: downloaded")
+            logged = False
+            # Nếu có Drive: chỉ log_done khi upload thành công
+            if drive_service and resolved_folder_id and fpath and fpath.exists():
+                try:
+                    fid, action = drive_upload_file(drive_service, fpath, resolved_folder_id)
+                    uploaded.append((fpath.name, action, fid))
+                    print(f"    [Drive] {action}: {fpath.name} ({fid})")
+                    log_done(url)      # <-- GHI Ở ĐÂY (sau khi UPLOAD THÀNH CÔNG)
+                    logged = True
+                except Exception as e:
+                    print(f"    [Drive] Upload lỗi: {e}")
+            # Không cấu hình Drive → log ngay sau khi download OK
+            if not logged and (not drive_service or not resolved_folder_id):
+                log_done(url)
                 logged = True
-            except Exception as ue:
-                print(f"    [Drive] Upload lỗi: {ue}")
 
-        # Nếu KHÔNG cấu hình Drive (service/folder thiếu) → cho phép log sau khi tải OK
-        if not logged and (not drive_service or not resolved_folder_id):
-            log_done(url)
-            logged = True
+            success.append(url)
 
-        # Nếu có Drive nhưng upload lỗi → KHÔNG ghi để lần sau chạy lại.
+        if i < len(run_list):
+            for t in range(SLEEP_SECONDS, 0, -1):
+                print(f"   Nghỉ {t}s...", end="\r"); time.sleep(1)
+            print(" " * 24, end="\r")
 
-        success.append(url)
-
-    else:
-        failed.append((url, err))
-        print(f" -> FAIL: {err}")
-
-    if i < len(run_list):
-        for t in range(SLEEP_SECONDS, 0, -1):
-            print(f"   Nghỉ {t}s...", end="\r"); time.sleep(1)
-        print(" " * 24, end="\r")
-
-# Đồng bộ và chống trùng sau batch
+# ------------------- DEDUPE & KẾT THÚC -------------------
 dedupe_dalay_against_links()
 
+# (Tuỳ chọn) upload dalay.txt lên Drive để kiểm chứng/backup
 if drive_service and resolved_folder_id and DALAY.exists():
     try:
         fid, action = drive_upload_file(drive_service, DALAY, resolved_folder_id)
@@ -462,12 +286,12 @@ if drive_service and resolved_folder_id and DALAY.exists():
 
 print("\n=== TỔNG KẾT ===")
 print(f"OK: {len(success)} | FAIL: {len(failed)}")
-print(f"Đã lưu file M4A vào: {OUT_DIR}")
+print(f"M4A dir: {OUT_DIR.resolve()}")
 if uploaded:
     print("Đã upload Drive:")
     for n, action, fid in uploaded:
         print(f" - {n} -> {action} ({fid})")
 if failed:
-    print("\nDanh sách lỗi:")
+    print("\nLỗi:")
     for u, e in failed:
         print(f"- {u}\n  Lý do: {e}\n")
