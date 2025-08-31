@@ -13,7 +13,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # Tăng thời gian chờ cho các danh sách dài
+    timeout-minutes: 360
     env:
       # --- ĐÍCH ---
       GDRIVE_FOLDER_ID: "1V9qkTesXnogNiTPUvDZOwJPj4Op4lTHF"
@@ -23,34 +23,72 @@ jobs:
       # --- DL ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
       SLEEP_SECONDS: "5"
-      MAX_PER_RUN: "99999"  # <<< Xử lý tất cả link trong một lần chạy
+      MAX_PER_RUN: "99999"  # vẫn giữ nguyên theo bạn
 
     steps:
+      # ==== Quan sát & thu hồi dung lượng trước khi chạy ====
+      - name: Disk space (before)
+        run: |
+          echo "== df -h ==" && df -h
+          echo "== Top heavy dirs ==" && sudo du -xh --max-depth=1 / | sort -h | tail -n 30 || true
+
+      - name: Reclaim space aggressively
+        run: |
+          # Xoá SDK/Tool lớn không dùng (giải phóng ~20–40GB)
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          # Dọn Docker (nếu có)
+          docker system prune -af || true
+          docker volume prune -f || true
+          # Dọn apt cache
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+
+      # ==== Chuẩn bị môi trường tạm: ép cache & file tạm vào RUNNER_TEMP ====
+      - name: Configure temp & caches (no local pip cache)
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/.cache" >> "$GITHUB_ENV"
+          echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
+          echo "PIP_DISABLE_PIP_VERSION_CHECK=1" >> "$GITHUB_ENV"
+          echo "PYTHONUNBUFFERED=1" >> "$GITHUB_ENV"
+          echo "PYTHONUTF8=1" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
 
-      - name: Setup Python (cache pip)
+      - name: Setup Python (no pip cache restore)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: "requirements.txt"
 
-      - name: Install Python deps
+      - name: Install Python deps (no cache dir)
         run: |
           python -m pip install -U pip
-          pip install -r requirements.txt
+          pip install --no-cache-dir -r requirements.txt
 
       - name: Install system ffmpeg (with ffprobe)
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
-      - name: Ensure data folder & files
+      # ==== Bố trí dữ liệu: symlink data/audio -> RUNNER_TEMP để tự sạch ====
+      - name: Ensure data folder & files (use RUNNER_TEMP for audio)
         run: |
-          mkdir -p data/audio
+          mkdir -p data
           [ -f data/links.txt ] || : > data/links.txt
           [ -f data/dalay.txt ] || : > data/dalay.txt
+          # Trỏ data/audio về thư mục tạm để tránh đầy đĩa
+          rm -rf data/audio || true
+          mkdir -p "$RUNNER_TEMP/audio"
+          ln -s "$RUNNER_TEMP/audio" data/audio
 
       - name: Debug links.txt (head)
         run: |
@@ -66,7 +104,17 @@ jobs:
         run: |
           python -u scripts/yt_audio_to_drive.py
 
+      # ==== Dọn ngay sau khi chạy để không giữ file nặng ====
+      - name: Cleanup temp audio
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/audio" || true
+          # Xoá symlink để tránh lẫn giữa các run
+          rm -f data/audio || true
+          mkdir -p "$RUNNER_TEMP/audio" && ln -s "$RUNNER_TEMP/audio" data/audio
+
       - name: Commit updated dalay.txt (if changed)
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -77,3 +125,7 @@ jobs:
             git commit -m "chore: update dalay.txt (YouTube audio processed)"
             git push
           fi
+
+      - name: Disk space (after)
+        if: always()
+        run: df -h
