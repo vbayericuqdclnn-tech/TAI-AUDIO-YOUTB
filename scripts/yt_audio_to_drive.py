@@ -4,6 +4,7 @@
 # - Cookie rotation + player-client rotation; PO_TOKEN tùy chọn
 # - Upload Drive: ƯU TIÊN OAuth (GDRIVE_OAUTH_TOKEN_JSON), fallback SA (GDRIVE_SA_JSON)
 # - Full Drive scope; fix ffmpeg/ffprobe; unbuffered logs
+# - Bổ sung: Xóa file audio sau khi upload thành công.
 
 import os, sys, re, json, time, shutil, tempfile
 from pathlib import Path
@@ -379,10 +380,20 @@ for i, url in enumerate(run_list, 1):
                 uploaded.append((fpath.name, action, fid))
                 print(f"    [Drive] {action}: {fpath.name} ({fid})")
                 upload_success = True
+
+                # --- START: THÊM LOGIC XÓA FILE ---
+                try:
+                    os.remove(fpath)
+                    print(f"    [Local] Đã xóa file: {fpath.name}")
+                except OSError as oe:
+                    print(f"    [Local] Lỗi khi xóa file {fpath.name}: {oe}")
+                # --- END: THÊM LOGIC XÓA FILE ---
+                    
             except Exception as ue:
                 print(f"    [Drive] Upload lỗi: {ue}")
                 failed.append((url, f"Upload failed: {ue}"))
         else:
+            # Trường hợp không upload (không cấu hình Drive) thì không xóa file
             upload_success = True
 
         if upload_success:
@@ -420,7 +431,7 @@ if drive_service and resolved_folder_id and DALAY.exists():
 
 print("\n=== TỔNG KẾT ===")
 print(f"OK: {len(success)} | FAIL: {len(failed)}")
-print(f"Đã lưu file M4A vào: {OUT_DIR}")
+print(f"Đã lưu file M4A vào: {OUT_DIR} (và đã xóa sau khi upload thành công)")
 if uploaded:
     print("Đã upload Drive:")
     for n, action, fid in uploaded:
