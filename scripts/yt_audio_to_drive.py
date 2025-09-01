@@ -32,7 +32,7 @@ if not DALAY.exists(): DALAY.write_text("", encoding="utf-8")
 
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "8"))
 SMOKE_TEST = os.environ.get("SMOKE_TEST", "0").strip() == "1"
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "100"))
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "40"))
 
 def _resolve_ffmpeg_dir() -> Optional[str]:
     ffmpeg_bin  = shutil.which("ffmpeg")
