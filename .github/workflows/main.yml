@@ -23,7 +23,7 @@ jobs:
       # --- DL ---
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
       SLEEP_SECONDS: "5"
-      MAX_PER_RUN: "40"  # vẫn giữ nguyên theo bạn
+      MAX_PER_RUN: "30"  # vẫn giữ nguyên theo bạn
 
     steps:
       # ==== Quan sát & thu hồi dung lượng trước khi chạy ====
