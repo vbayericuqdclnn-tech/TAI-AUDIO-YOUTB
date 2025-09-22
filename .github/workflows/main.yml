@@ -149,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # +++ ĐỔI lại đúng path file workflow này
-      WORKFLOW_FILE: ".github/workflows/yt-audio-drive.yml"
+      WORKFLOW_FILE: ".github/workflows/main.yml"
     steps:
       - name: Queue next run (self-dispatch)
         run: |
