@@ -1,25 +1,9 @@
 name: YouTube Audio → Drive (Manual Run)
 
 on:
-  # +++ thêm inputs để đếm vòng & giới hạn số lần tự chạy tiếp
-  workflow_dispatch:
-    inputs:
-      max_runs:
-        description: "Số lần chạy liên tiếp tối đa (>=1). Mặc định 1 = không tự lặp."
-        required: false
-        default: "1"
-      run_id:
-        description: "Đếm vòng (nội bộ) — không cần chỉnh khi nhấn Run"
-        required: false
-        default: "1"
-
-permissions:
-  contents: write
-  actions: write   # +++ bắt buộc để tự dispatch chính workflow
-
-concurrency:
-  group: yt-audio-drive
-  cancel-in-progress: false
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 2,5,8,11,14,17,20,23 * * *"  # 09:00, 12:00, 15:00, 18:00, 21:00, 00:00, 03:00, 06:00 (VN)
 
 jobs:
   run:
