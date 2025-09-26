@@ -2,8 +2,18 @@ name: YouTube Audio → Drive (Manual Run)
 
 on:
   workflow_dispatch: {}
+  
   schedule:
-    - cron: "0 2,5,8,11,14,17,20,23 * * *"  # 09:00, 12:00, 15:00, 18:00, 21:00, 00:00, 03:00, 06:00 (VN)
+    - cron: "0 23,2,5,8,11,14,17,20 * * *"  # 06:00, 09:00, 12:00, 15:00, 18:00, 21:00, 00:00, 03:00 (giờ VN)
+
+
+permissions:
+  contents: write
+  actions: write   # +++ bắt buộc để tự dispatch chính workflow
+
+concurrency:
+  group: yt-audio-drive
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -56,6 +66,7 @@ jobs:
         with:
           fetch-depth: 1
           lfs: false
+          persist-credentials: false
 
       - name: Setup Python (no pip cache restore)
         uses: actions/setup-python@v5
@@ -111,15 +122,19 @@ jobs:
       - name: Commit updated dalay.txt (if changed)
         if: always()
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           if git diff --quiet --exit-code -- data/dalay.txt; then
             echo "No changes in dalay.txt"
           else
             git add data/dalay.txt
-            git commit -m "chore: update dalay.txt (YouTube audio processed)"
-            git push
+            git commit -m "chore: update dalay.txt (YouTube audio processed)" || exit 0
+            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git pull --rebase origin "${{ github.ref_name }}" || true
+            git push origin "HEAD:${{ github.ref_name }}"
           fi
+
 
       - name: Disk space (after)
         if: always()
