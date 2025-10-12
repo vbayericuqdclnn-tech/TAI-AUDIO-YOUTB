@@ -3,9 +3,7 @@ name: YouTube Audio → Drive (Manual Run)
 on:
   workflow_dispatch: {}
   
-  schedule:
-    - cron: "1,4,7,10,13,16,19,22, * * *"  # 06:00, 09:00, 12:00, 15:00, 18:00, 21:00, 00:00, 03:00 (giờ VN)
-
+  
 
 permissions:
   contents: write
