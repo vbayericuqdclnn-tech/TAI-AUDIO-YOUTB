@@ -1,161 +1,105 @@
-name: YouTube Audio → Drive (Manual Run)
+name: "YouTube Audio to Drive (fixed)"
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: "0 23,1,3,5,7,9,11,13,15,17,19 * * *"  
-
-  
-
-permissions:
-  contents: write
-  actions: write   # +++ bắt buộc để tự dispatch chính workflow
-
-concurrency:
-  group: yt-audio-drive
-  cancel-in-progress: false
+  # schedule:
+  #   - cron: "0 */6 * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      contents: read
+
     env:
-      # --- ĐÍCH ---
-      GDRIVE_FOLDER_ID: "1DiCj5w4YL-dN3s_grts0Pq1HxWQ5zcYL"
+      # ==== TUỲ CHỈNH NHANH ====
+      SLEEP_SECONDS: "8"
+      MAX_PER_RUN: "40"
+
+      # ==== GOOGLE DRIVE ====
+      # Dùng 1 trong 2 (ưu tiên OAuth nếu cả hai có):
       GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
       GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
 
-      # --- DL ---
+      # ==== YouTube extractor (tuỳ chọn) ====
       PO_TOKEN: ${{ secrets.PO_TOKEN }}
-      SLEEP_SECONDS: "5"
-      MAX_PER_RUN: "30"  # vẫn giữ nguyên theo bạn
 
     steps:
-      # ==== Quan sát & thu hồi dung lượng trước khi chạy ====
-      - name: Disk space (before)
-        run: |
-          echo "== df -h ==" && df -h
-          echo "== Top heavy dirs ==" && sudo du -xh --max-depth=1 / | sort -h | tail -n 30 || true
-
-      - name: Reclaim space aggressively
-        run: |
-          # Xoá SDK/Tool lớn không dùng (giải phóng ~20–40GB)
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache || true
-          # Dọn Docker (nếu có)
-          docker system prune -af || true
-          docker volume prune -f || true
-          # Dọn apt cache
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-
-      # ==== Chuẩn bị môi trường tạm: ép cache & file tạm vào RUNNER_TEMP ====
-      - name: Configure temp & caches (no local pip cache)
-        run: |
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          echo "XDG_CACHE_HOME=$RUNNER_TEMP/.cache" >> "$GITHUB_ENV"
-          echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
-          echo "PIP_DISABLE_PIP_VERSION_CHECK=1" >> "$GITHUB_ENV"
-          echo "PYTHONUNBUFFERED=1" >> "$GITHUB_ENV"
-          echo "PYTHONUTF8=1" >> "$GITHUB_ENV"
-
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          lfs: false
-          persist-credentials: false
 
-      - name: Setup Python (no pip cache restore)
+      - name: "Setup Python"
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
-      - name: Install Python deps (no cache dir)
-        run: |
-          python -m pip install -U pip
-          pip install --no-cache-dir -r requirements.txt
-
-      - name: Install system ffmpeg (with ffprobe)
+      - name: "Install system deps (ffmpeg)"
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
 
-      # ==== Bố trí dữ liệu: symlink data/audio -> RUNNER_TEMP để tự sạch ====
-      - name: Ensure data folder & files (use RUNNER_TEMP for audio)
+      # Cài yt-dlp mới nhất từ GitHub (né nsig/SABR)
+      - name: "Install latest yt-dlp from master"
         run: |
-          mkdir -p data
-          [ -f data/links.txt ] || : > data/links.txt
-          [ -f data/dalay.txt ] || : > data/dalay.txt
-          # Trỏ data/audio về thư mục tạm để tránh đầy đĩa
-          rm -rf data/audio || true
-          mkdir -p "$RUNNER_TEMP/audio"
-          ln -s "$RUNNER_TEMP/audio" data/audio
+          python -m pip install --upgrade "yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.zip"
+          yt-dlp --version
 
-      - name: Debug links.txt (head)
+      - name: "Install Python deps"
         run: |
-          echo "Branch: $(git rev-parse --abbrev-ref HEAD)"
-          echo "links.txt size: $(wc -c < data/links.txt) bytes | lines: $(wc -l < data/links.txt)"
-          sed -n '1,10p' data/links.txt | nl -ba || true
-          echo "done lines: $(wc -l < data/dalay.txt || echo 0)"
+          python -m pip install --upgrade google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
 
-      - name: Run downloader (all links, upload to Drive)
+      # (OPTIONAL) ghi cookies_multi.txt nếu có secret
+      - name: "Write cookies_multi.txt (optional)"
         env:
-          PYTHONUNBUFFERED: "1"
-          PYTHONUTF8: "1"
+          _COOKIES: ${{ secrets.YT_COOKIES_MULTI }}
         run: |
-          python -u scripts/yt_audio_to_drive.py
-
-      # ==== Dọn ngay sau khi chạy để không giữ file nặng ====
-      - name: Cleanup temp audio
-        if: always()
-        run: |
-          rm -rf "$RUNNER_TEMP/audio" || true
-          # Xoá symlink để tránh lẫn giữa các run
-          rm -f data/audio || true
-          mkdir -p "$RUNNER_TEMP/audio" && ln -s "$RUNNER_TEMP/audio" data/audio
-
-      - name: Commit updated dalay.txt (if changed)
-        if: always()
-        run: |
-          git config --global user.name  "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if git diff --quiet --exit-code -- data/dalay.txt; then
-            echo "No changes in dalay.txt"
+          set -e
+          mkdir -p data
+          if [ -n "${_COOKIES}" ]; then
+            printf '%s' "${_COOKIES}" > data/cookies_multi.txt
+            echo "cookies_multi.txt created."
           else
-            git add data/dalay.txt
-            git commit -m "chore: update dalay.txt (YouTube audio processed)" || exit 0
-            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-            git pull --rebase origin "${{ github.ref_name }}" || true
-            git push origin "HEAD:${{ github.ref_name }}"
+            echo "YT_COOKIES_MULTI not set; skipping."
           fi
 
-
-      - name: Disk space (after)
-        if: always()
-        run: df -h
-
-  # +++ JOB mới: tự dispatch chính workflow sau khi xong (nếu chưa đạt max_runs)
-  requeue:
-    needs: run
-    # chạy tiếp khi được khởi động bằng workflow_dispatch và còn < max_runs
-    if: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.run_id) < fromJSON(inputs.max_runs) }}
-    runs-on: ubuntu-latest
-    env:
-      # +++ ĐỔI lại đúng path file workflow này
-      WORKFLOW_FILE: ".github/workflows/main.yml"
-    steps:
-      - name: Queue next run (self-dispatch)
+      # (OPTIONAL) ghi po_token.txt nếu muốn để ở file
+      - name: "Write po_token.txt (optional)"
+        env:
+          _POFILE: ${{ secrets.PO_TOKEN_FILE }}
         run: |
-          NEXT=$(( ${{ inputs.run_id }} + 1 ))
-          echo "Dispatch vòng ${NEXT}/${{ inputs.max_runs }}"
-          curl -s -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/dispatches \
-            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"run_id\":\"${NEXT}\",\"max_runs\":\"${{ inputs.max_runs }}\"}}"
+          set -e
+          mkdir -p data
+          if [ -n "${_POFILE}" ]; then
+            printf '%s' "${_POFILE}" > data/po_token.txt
+            echo "po_token.txt created."
+          else
+            echo "PO_TOKEN_FILE not set; skipping."
+          fi
+
+      # >>> CHỈ SỬA STEP NÀY: ép dùng ROOT/data cho scripts/yt_audio_to_drive.py
+      - name: "Run - YouTube audio to Drive (scripts/, ROOT/data)"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Kiểm tra script
+          if [ ! -f "scripts/yt_audio_to_drive.py" ]; then
+            echo "::error::Không tìm thấy scripts/yt_audio_to_drive.py"
+            ls -la scripts || true
+            exit 2
+          fi
+
+          # Đảm bảo ROOT/data tồn tại (bạn đã xác nhận dùng ROOT/data)
+          mkdir -p data
+
+          # Bắt buộc dùng ROOT/data: làm symlink cứng scripts/data -> ROOT/data
+          rm -rf scripts/data
+          ln -s "$(pwd)/data" scripts/data
+
+          echo "[INFO] scripts/data -> $(readlink -f scripts/data)"
+          ls -la scripts | sed -n '1,200p'
+          ls -la data || true
+
+          python -u scripts/yt_audio_to_drive.py
