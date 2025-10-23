@@ -2,8 +2,7 @@ name: "YouTube Audio to Drive (fixed)"
 
 on:
   workflow_dispatch: {}
-  # schedule:
-  #   - cron: "0 */6 * * *"
+  
 
 jobs:
   run:
@@ -63,7 +62,37 @@ jobs:
           else
             echo "YT_COOKIES_MULTI not set; skipping."
           fi
+          
+      # ==== Dọn ngay sau khi chạy để không giữ file nặng ====
+      - name: Cleanup temp audio
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/audio" || true
+          # Xoá symlink để tránh lẫn giữa các run
+          rm -f data/audio || true
+          mkdir -p "$RUNNER_TEMP/audio" && ln -s "$RUNNER_TEMP/audio" data/audio
 
+      - name: Commit updated dalay.txt (if changed)
+        if: always()
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if git diff --quiet --exit-code -- data/dalay.txt; then
+            echo "No changes in dalay.txt"
+          else
+            git add data/dalay.txt
+            git commit -m "chore: update dalay.txt (YouTube audio processed)" || exit 0
+            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git pull --rebase origin "${{ github.ref_name }}" || true
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+
+      - name: Disk space (after)
+        if: always()
+        run: df -h
+    
       # (OPTIONAL) ghi po_token.txt nếu muốn để ở file
       - name: "Write po_token.txt (optional)"
         env:
