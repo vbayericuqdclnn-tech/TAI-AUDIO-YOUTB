@@ -179,7 +179,7 @@ def drive_upload_file(service, file_path: Path, folder_id: str):
     created = service.files().create(body=body, media_body=media, fields="id", supportsAllDrives=True).execute()
     return created["id"], "created"
 
-# --- LOGIC YT-DLP (Đã sửa lỗi) ---
+# --- LOGIC YT-DLP (Đã fix SABR/nsig tối thiểu, giữ nguyên các phần khác) ---
 BASE_YDL_OPTS = {
     "format": "bestaudio[ext=m4a]/bestaudio/best",
     "merge_output_format": "m4a",
@@ -188,7 +188,15 @@ BASE_YDL_OPTS = {
     "quiet": False,
     "nocheckcertificate": True,
     "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
-    "retries": 5, "fragment_retries": 5, "force_ipv4": True,
+    "retries": 5,
+    "fragment_retries": 5,
+    "force_ipv4": True,
+
+    # >>> NEW: Ưu tiên HLS để né SABR, tăng độ bền khi tải
+    "hls_use_mpegts": True,
+    "concurrent_fragment_downloads": 8,
+    "format_sort": ["proto:m3u8", "res"],
+    "format_sort_force": False,  # giữ mềm dẻo: nếu không có m3u8 vẫn lấy format tốt nhất
 }
 if FFMPEG_DIR:
     BASE_YDL_OPTS["ffmpeg_location"] = FFMPEG_DIR
@@ -216,38 +224,42 @@ def try_download_with_cookies(url: str) -> Tuple[bool, Optional[str], Optional[P
 
     for ck_idx in order:
         cookiefile = COOKIE_FILES[ck_idx] if ck_idx is not None else None
-        plans = [["web"], ["web_embedded"], ["android"]] if cookiefile else [["android"], ["web"], ["web_embedded"]]
-        if cookiefile: print(f"   -> Thử cookie set #{ck_idx}")
+        # >>> NEW: thêm web_safari; thứ tự ưu tiên khi có cookie
+        if cookiefile:
+            plans = [["web_safari"], ["web_embedded"], ["web"], ["android"]]
+            print(f"   -> Thử cookie set #{ck_idx}")
+        else:
+            # Không có cookie: android trước để dễ ra HLS
+            plans = [["android"], ["web_safari"], ["web_embedded"], ["web"]]
 
         for pcs in plans:
             try:
                 ydl_opts = _ydl_opts_with_client(BASE_YDL_OPTS, pcs, cookiefile, po_token)
                 before = set(OUT_DIR.glob("*.m4a"))
-                
+
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(url, download=False)
                     filename = Path(ydl.prepare_filename(info_dict))
                     # Nếu file đã tồn tại, coi như thành công và bỏ qua
                     if filename.exists():
                         print(f"   -> File đã tồn tại: '{filename.name}'. Bỏ qua tải về.")
-                        return True, None, None # FIX: Trả về thành công nhưng không có đường dẫn file để upload
+                        return True, None, None
 
                     ydl.download([url])
 
                 after = set(OUT_DIR.glob("*.m4a"))
                 new_files = sorted(list(after - before), key=lambda p: p.stat().st_mtime, reverse=True)
-                
+
                 if new_files:
                     if ck_idx is not None: last_good_cookie_idx = ck_idx
                     return True, None, new_files[0]
                 else:
-                    # Trường hợp này ít xảy ra do đã kiểm tra ở trên, nhưng để phòng bị
                     return True, "Không có file mới được tạo (có thể đã tồn tại)", None
 
             except Exception as e:
                 last_err = str(e)
                 continue
-    
+
     return False, last_err, None
 
 # --- CHUẨN BỊ CHẠY ---
@@ -270,34 +282,32 @@ if not run_list:
 for i, url in enumerate(run_list, 1):
     print(f"\n[{i}/{len(run_list)}] Đang xử lý: {url}")
     ok, err, fpath = try_download_with_cookies(url)
-    
+
     if ok:
         print(" -> Tải về OK.")
-        # FIX: Mặc định là thành công, chỉ đổi thành False nếu upload thất bại
         task_successful = True
-        
-        # Chỉ upload nếu có đường dẫn file trả về và file thực sự tồn tại
+
         if fpath and fpath.exists():
             if drive_service and resolved_folder_id:
                 try:
                     fid, action = drive_upload_file(drive_service, fpath, resolved_folder_id)
                     uploaded.append((fpath.name, action, fid))
                     print(f"    [Drive] Upload thành công: {fpath.name}")
-                    
+
                     try:
                         os.remove(fpath)
                         print(f"    [Local] Đã xóa file: {fpath.name}")
                     except OSError as oe:
                         print(f"    [Local] Lỗi khi xóa file {fpath.name}: {oe}")
-                        
+
                 except Exception as ue:
                     print(f"    [Drive] Upload lỗi: {ue}")
                     failed.append((url, f"Upload failed: {ue}"))
-                    task_successful = False # Đánh dấu thất bại nếu upload lỗi
+                    task_successful = False
             else:
                 print(f"    [Local] Giữ lại file (không cấu hình Drive): {fpath.name}")
         else:
-             print("    -> Không có file mới để upload (có thể đã tồn tại từ trước).")
+            print("    -> Không có file mới để upload (có thể đã tồn tại từ trước).")
 
         if task_successful:
             success.append(url)
