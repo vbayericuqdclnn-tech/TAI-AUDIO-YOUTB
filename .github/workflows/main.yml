@@ -1,15 +1,7 @@
 name: "YouTube Audio to Drive (fixed)"
 
 on:
-  schedule:
-    - cron: '0 0 * * *'   # 11:00 VN
-    - cron: '0 3 * * *'   # 13:00 VN
-    - cron: '0 6 * * *'   # 16:00 VN
-    - cron: '0 9 * * *'   # 11:00 VN
-    - cron: '0 12 * * *'   # 13:00 VN
-    - cron: '0 15 * * *'   # 11:00 VN
-    - cron: '0 18 * * *'   # 13:00 VN
-    - cron: '0 21 * * *'   # 16:00 VN
+  
   workflow_dispatch: {}
   
 
