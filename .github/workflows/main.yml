@@ -14,31 +14,57 @@ jobs:
 
     env:
       # ==== TUỲ CHỈNH NHANH ====
-      SLEEP_SECONDS: "8"
+      # Mỗi lần run, tối đa xử lý bao nhiêu URL (chưa có trong dalay.txt)
       MAX_PER_RUN: "40"
+      # Thời gian ngủ giữa 2 URL (giảm tải, tránh bị chặn)
+      SLEEP_SECONDS: "5"
 
-      # ==== GOOGLE DRIVE ====
-      # Dùng 1 trong 2 (ưu tiên OAuth nếu cả hai có):
-      GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
-      GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+      # Tên file danh sách link gốc + file đã xử lý
+      LINKS_FILE: "links.txt"
+      DALAY_FILE: "dalay.txt"
+
+      # GDrive folder ID (bắt buộc phải set trong secrets)
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
 
-      # ==== YouTube extractor (tuỳ chọn) ====
-      PO_TOKEN: ${{ secrets.PO_TOKEN }}
+      # Google OAuth token JSON (bắt buộc phải set trong secrets)
+      GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
 
     steps:
       - name: "Checkout"
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: "Setup Python"
+      - name: "Show repo files"
+        run: |
+          ls -la
+          echo
+          echo "data/:"
+          ls -la data || true
+          echo
+          echo "scripts/:"
+          ls -la scripts || true
+
+      - name: "Python setup"
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: "Install system deps (ffmpeg)"
+      - name: "Show Python & pip"
+        run: |
+          python --version
+          pip --version
+
+      - name: "Install ffmpeg"
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      - name: "Check ffmpeg & disk"
+        run: |
+          ffmpeg -version | head -n 5
+          df -h
+          du -sh .
 
       # Cài yt-dlp mới nhất từ GitHub (né nsig/SABR)
       - name: "Install latest yt-dlp from master"
@@ -73,28 +99,6 @@ jobs:
           rm -f data/audio || true
           mkdir -p "$RUNNER_TEMP/audio" && ln -s "$RUNNER_TEMP/audio" data/audio
 
-      - name: Commit updated dalay.txt (if changed)
-        if: always()
-        run: |
-          git config --global user.name  "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if git diff --quiet --exit-code -- data/dalay.txt; then
-            echo "No changes in dalay.txt"
-          else
-            git add data/dalay.txt
-            git commit -m "chore: update dalay.txt (YouTube audio processed)" || exit 0
-            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-            git pull --rebase origin "${{ github.ref_name }}" || true
-            git push origin "HEAD:${{ github.ref_name }}"
-          fi
-
-
-      - name: Disk space (after)
-        if: always()
-        run: df -h
-    
-      # (OPTIONAL) ghi po_token.txt nếu muốn để ở file
       - name: "Write po_token.txt (optional)"
         env:
           _POFILE: ${{ secrets.PO_TOKEN_FILE }}
@@ -108,7 +112,6 @@ jobs:
             echo "PO_TOKEN_FILE not set; skipping."
           fi
 
-      # >>> CHỈ SỬA STEP NÀY: ép dùng ROOT/data cho scripts/yt_audio_to_drive.py
       - name: "Run - YouTube audio to Drive (scripts/, ROOT/data)"
         shell: bash
         run: |
@@ -133,3 +136,25 @@ jobs:
           ls -la data || true
 
           python -u scripts/yt_audio_to_drive.py
+
+      - name: Commit updated dalay.txt (if changed)
+        if: always()
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if git diff --quiet --exit-code -- data/dalay.txt; then
+            echo "No changes in dalay.txt"
+          else
+            git add data/dalay.txt
+            git commit -m "chore: update dalay.txt (YouTube audio processed)" || exit 0
+            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            git pull --rebase origin "${{ github.ref_name }}" || true
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+      - name: Disk space (after)
+        if: always()
+        run: df -h
+    
+      # (OPTIONAL) ghi po_token.txt nếu muốn để ở file
