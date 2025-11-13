@@ -1,16 +1,14 @@
 name: "YouTube Audio to Drive (fixed)"
 
 on:
-  
   workflow_dispatch: {}
-  
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
-      contents: read
+      contents: write   # <<< PHẢI LÀ write ĐỂ COMMIT/PUSH ĐƯỢC
 
     env:
       # ==== TUỲ CHỈNH NHANH ====
@@ -19,7 +17,7 @@ jobs:
       # Thời gian ngủ giữa 2 URL (giảm tải, tránh bị chặn)
       SLEEP_SECONDS: "5"
 
-      # Tên file danh sách link gốc + file đã xử lý
+      # Tên file danh sách link gốc + file đã xử lý (script hiện đang dùng data/links.txt, data/dalay.txt)
       LINKS_FILE: "links.txt"
       DALAY_FILE: "dalay.txt"
 
@@ -90,14 +88,14 @@ jobs:
             echo "YT_COOKIES_MULTI not set; skipping."
           fi
           
-      # ==== Dọn ngay sau khi chạy để không giữ file nặng ====
+      # Chuẩn bị thư mục audio tạm (symlink sang data/audio)
       - name: Cleanup temp audio
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/audio" || true
-          # Xoá symlink để tránh lẫn giữa các run
           rm -f data/audio || true
-          mkdir -p "$RUNNER_TEMP/audio" && ln -s "$RUNNER_TEMP/audio" data/audio
+          mkdir -p "$RUNNER_TEMP/audio"
+          ln -s "$RUNNER_TEMP/audio" data/audio
 
       - name: "Write po_token.txt (optional)"
         env:
@@ -124,10 +122,10 @@ jobs:
             exit 2
           fi
 
-          # Đảm bảo ROOT/data tồn tại (bạn đã xác nhận dùng ROOT/data)
+          # Đảm bảo ROOT/data tồn tại
           mkdir -p data
 
-          # Bắt buộc dùng ROOT/data: làm symlink cứng scripts/data -> ROOT/data
+          # Bắt buộc dùng ROOT/data: làm symlink scripts/data -> ROOT/data
           rm -rf scripts/data
           ln -s "$(pwd)/data" scripts/data
 
@@ -143,6 +141,7 @@ jobs:
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
           if git diff --quiet --exit-code -- data/dalay.txt; then
             echo "No changes in dalay.txt"
           else
@@ -156,5 +155,3 @@ jobs:
       - name: Disk space (after)
         if: always()
         run: df -h
-    
-      # (OPTIONAL) ghi po_token.txt nếu muốn để ở file
