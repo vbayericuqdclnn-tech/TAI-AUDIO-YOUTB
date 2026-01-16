@@ -222,6 +222,9 @@ BASE_YDL_OPTS = {
     "concurrent_fragment_downloads": 8,
     "format_sort": ["proto:m3u8", "res"],
     "format_sort_force": False,
+    # FIX YouTube JS challenge (EJS): cho phép yt-dlp tự tải solver script từ GitHub
+    # (cần cài JS runtime như Deno trong workflow)
+    "remote_components": {"ejs:github"},
 }
 if FFMPEG_DIR:
     BASE_YDL_OPTS["ffmpeg_location"] = FFMPEG_DIR
