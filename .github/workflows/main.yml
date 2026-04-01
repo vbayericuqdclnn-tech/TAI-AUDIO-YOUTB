@@ -18,8 +18,8 @@ jobs:
       contents: write
 
     env:
-      MAX_PER_RUN: "40"
-      SLEEP_SECONDS: "7"
+      MAX_PER_RUN: "12"
+      SLEEP_SECONDS: "15"
       TOKEN_TTL: "6"
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
@@ -82,7 +82,7 @@ jobs:
             printf '%s' "${YT_COOKIES_MULTI}" > data/cookies_multi.txt
             echo "cookies_multi.txt created"
           else
-            echo "YT_COOKIES_MULTI not set; guest mode still works for public videos"
+            echo "YT_COOKIES_MULTI not set"
           fi
 
       - name: Prepare audio temp dir
@@ -103,11 +103,9 @@ jobs:
           echo "data:"
           ls -la data || true
           echo
-          sed -n '1,80p' scripts/yt_audio_to_drive.py
+          sed -n '1,120p' scripts/yt_audio_to_drive.py
 
       - name: Run downloader
-        env:
-          BGUTIL_SERVER_HOME: ${{ runner.temp }}/../home/runner/bgutil-ytdlp-pot-provider/server
         run: |
           set -euo pipefail
           mkdir -p data
