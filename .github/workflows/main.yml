@@ -18,7 +18,7 @@ jobs:
       contents: write
 
     env:
-      MAX_PER_RUN: "12"
+      MAX_PER_RUN: "50"
       SLEEP_SECONDS: "15"
       TOKEN_TTL: "6"
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
