@@ -1,10 +1,14 @@
-name: "YouTube Audio to Drive (fixed)"
+name: YouTube Audio to Drive
 
 on:
-  
-
-    
-  workflow_dispatch: {}
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * *"
+    - cron: "0 5 * * *"
+    - cron: "0 9 * * *"
+    - cron: "0 13 * * *"
+    - cron: "0 17 * * *"
+    - cron: "0 21 * * *"
 
 jobs:
   run:
@@ -15,147 +19,123 @@ jobs:
 
     env:
       MAX_PER_RUN: "40"
-      SLEEP_SECONDS: "5"
-
-      LINKS_FILE: "links.txt"
-      DALAY_FILE: "dalay.txt"
-
+      SLEEP_SECONDS: "7"
+      TOKEN_TTL: "6"
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       GDRIVE_OAUTH_TOKEN_JSON: ${{ secrets.GDRIVE_OAUTH_TOKEN_JSON }}
 
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: "Show repo files"
-        run: |
-          ls -la
-          echo
-          echo "data/:"
-          ls -la data || true
-          echo
-          echo "scripts/:"
-          ls -la scripts || true
-
-      - name: "Python setup"
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: "Setup Deno (JS runtime cho yt-dlp/EJS)"
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Deno
         uses: denoland/setup-deno@v2
         with:
           deno-version: "v2.x"
 
-      - name: "Show Deno + PATH"
-        run: |
-          deno --version
-          which deno
-          echo "PATH=$PATH"
-
-      - name: "Show Python & pip"
-        run: |
-          python --version
-          pip --version
-
-      - name: "Install ffmpeg"
+      - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg git
 
-      - name: "Check ffmpeg & disk"
+      - name: Install Python packages
         run: |
-          ffmpeg -version | head -n 5
-          df -h
-          du -sh .
-
-      - name: "Install yt-dlp (default deps) + update master"
-        run: |
-          python -m pip install --upgrade "yt-dlp[default]"
-          python -m pip install --upgrade "yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.zip"
-          yt-dlp --version
-          python -c "import yt_dlp; print('yt-dlp OK')"
-          python -c "import yt_dlp_ejs; print('yt-dlp-ejs OK')"
-
-      - name: "Install Python deps"
-        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --upgrade --pre "yt-dlp[default]"
+          python -m pip install --upgrade yt-dlp-ejs
+          python -m pip install --upgrade bgutil-ytdlp-pot-provider
           python -m pip install --upgrade google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
+          yt-dlp --version
+          python - <<'PY'
+          import yt_dlp
+          print("yt_dlp:", yt_dlp.version.__version__)
+          PY
 
-      - name: "Write cookies_multi.txt (optional)"
-        env:
-          _COOKIES: ${{ secrets.YT_COOKIES_MULTI }}
+      - name: Install bgutil provider server
         run: |
-          set -e
+          rm -rf "$HOME/bgutil-ytdlp-pot-provider"
+          git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git "$HOME/bgutil-ytdlp-pot-provider"
+          cd "$HOME/bgutil-ytdlp-pot-provider/server"
+          npm ci
+          npx tsc
+          test -f build/main.js
+          echo "BGUTIL_SERVER_HOME=$HOME/bgutil-ytdlp-pot-provider/server"
+
+      - name: Write cookies file
+        env:
+          YT_COOKIES_MULTI: ${{ secrets.YT_COOKIES_MULTI }}
+        run: |
           mkdir -p data
-          if [ -n "${_COOKIES}" ]; then
-            printf '%s' "${_COOKIES}" > data/cookies_multi.txt
-            echo "cookies_multi.txt created."
+          if [ -n "${YT_COOKIES_MULTI}" ]; then
+            printf '%s' "${YT_COOKIES_MULTI}" > data/cookies_multi.txt
+            echo "cookies_multi.txt created"
           else
-            echo "YT_COOKIES_MULTI not set; skipping."
+            echo "YT_COOKIES_MULTI not set; guest mode still works for public videos"
           fi
 
-      - name: Cleanup temp audio
-        if: always()
+      - name: Prepare audio temp dir
         run: |
           rm -rf "$RUNNER_TEMP/audio" || true
           rm -f data/audio || true
           mkdir -p "$RUNNER_TEMP/audio"
           ln -s "$RUNNER_TEMP/audio" data/audio
 
-      - name: "Write po_token.txt (optional)"
-        env:
-          _POFILE: ${{ secrets.PO_TOKEN_FILE }}
+      - name: Show files
         run: |
-          set -e
-          mkdir -p data
-          if [ -n "${_POFILE}" ]; then
-            printf '%s' "${_POFILE}" > data/po_token.txt
-            echo "po_token.txt created."
-          else
-            echo "PO_TOKEN_FILE not set; skipping."
-          fi
+          echo "repo:"
+          ls -la
+          echo
+          echo "scripts:"
+          ls -la scripts || true
+          echo
+          echo "data:"
+          ls -la data || true
+          echo
+          sed -n '1,80p' scripts/yt_audio_to_drive.py
 
-      - name: "Run - YouTube audio to Drive (scripts/, ROOT/data)"
-        shell: bash
+      - name: Run downloader
+        env:
+          BGUTIL_SERVER_HOME: ${{ runner.temp }}/../home/runner/bgutil-ytdlp-pot-provider/server
         run: |
           set -euo pipefail
-
-          if [ ! -f "scripts/yt_audio_to_drive.py" ]; then
-            echo "::error::Không tìm thấy scripts/yt_audio_to_drive.py"
-            ls -la scripts || true
-            exit 2
-          fi
-
           mkdir -p data
-
           rm -rf scripts/data
           ln -s "$(pwd)/data" scripts/data
-
-          echo "[INFO] scripts/data -> $(readlink -f scripts/data)"
-          ls -la scripts | sed -n '1,200p'
-          ls -la data || true
-
+          export BGUTIL_SERVER_HOME="$HOME/bgutil-ytdlp-pot-provider/server"
+          export TOKEN_TTL="${TOKEN_TTL}"
           python -u scripts/yt_audio_to_drive.py
 
-      - name: Commit updated dalay.txt (if changed)
+      - name: Commit dalay.txt
         if: always()
         run: |
-          git config --global user.name  "github-actions[bot]"
+          git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           if git diff --quiet --exit-code -- data/dalay.txt; then
             echo "No changes in dalay.txt"
-          else
-            git add data/dalay.txt
-            git commit -m "chore: update dalay.txt (YouTube audio processed)" || exit 0
-            git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-            git pull --rebase origin "${{ github.ref_name }}" || true
-            git push origin "HEAD:${{ github.ref_name }}"
+            exit 0
           fi
 
-      - name: Disk space (after)
+          git add data/dalay.txt
+          git commit -m "chore: update dalay.txt" || exit 0
+          git pull --rebase origin "${{ github.ref_name }}" || true
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - name: Disk usage
         if: always()
-        run: df -h
+        run: |
+          df -h
+          du -sh . || true
