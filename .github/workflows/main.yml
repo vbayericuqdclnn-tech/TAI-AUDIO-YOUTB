@@ -2,14 +2,7 @@ name: YouTube Audio to Drive
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 1 * * *"
-    - cron: "0 5 * * *"
-    - cron: "0 9 * * *"
-    - cron: "0 13 * * *"
-    - cron: "0 17 * * *"
-    - cron: "0 21 * * *"
-
+  
 jobs:
   run:
     runs-on: ubuntu-latest
