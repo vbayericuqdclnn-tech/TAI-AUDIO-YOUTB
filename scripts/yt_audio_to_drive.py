@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # GitHub Actions friendly YouTube audio -> M4A -> Google Drive
 # Strategy:
-# 1) Try guest session first for public videos
-# 2) Fallback to cookies only if needed
-# 3) Use yt-dlp CLI (not Python API) so plugin loading/debug matches documented CLI behavior
-# 4) Prefer mweb + PO Token provider, then web, then web_safari fallback
-# 5) Keep delays between videos to reduce rate-limit pressure
+# - cookie-first
+# - prefer mweb, then web_safari
+# - guest fallback only if cookie path fails
+# - reduce request pressure to avoid 429
+# - use yt-dlp CLI so plugin loading/debug matches CLI output
 
 import json
 import mimetypes
@@ -39,8 +39,8 @@ DALAY = DATA_DIR / "dalay.txt"
 COOKIES_MULTI = DATA_DIR / "cookies_multi.txt"
 
 YT_DLP_BIN = os.environ.get("YT_DLP_BIN", "yt-dlp")
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "40"))
-SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "7"))
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "12"))
+SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "15"))
 TOKEN_TTL = os.environ.get("TOKEN_TTL", "6").strip()
 BGUTIL_SERVER_HOME = os.environ.get(
     "BGUTIL_SERVER_HOME",
@@ -51,20 +51,20 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
 if not LINKS.exists():
     LINKS.write_text("", encoding="utf-8")
+
 if not DALAY.exists():
     DALAY.write_text("", encoding="utf-8")
 
 INVALID_COOKIE_FILES = set()
 
 ATTEMPTS = [
-    {"label": "guest/mweb", "client": "mweb", "use_cookie": False, "skip_hls": True},
-    {"label": "guest/web", "client": "web", "use_cookie": False, "skip_hls": True},
-    {"label": "guest/web_safari", "client": "web_safari", "use_cookie": False, "skip_hls": False},
     {"label": "cookie/mweb", "client": "mweb", "use_cookie": True, "skip_hls": True},
-    {"label": "cookie/web", "client": "web", "use_cookie": True, "skip_hls": True},
     {"label": "cookie/web_safari", "client": "web_safari", "use_cookie": True, "skip_hls": False},
+    {"label": "guest/mweb", "client": "mweb", "use_cookie": False, "skip_hls": True},
+    {"label": "guest/web_safari", "client": "web_safari", "use_cookie": False, "skip_hls": False},
 ]
 
 
@@ -307,8 +307,12 @@ def build_cmd(url: str, client: str, skip_hls: bool, cookiefile: Optional[str]) 
         "--ignore-config",
         "--no-playlist",
         "--newline",
+        "--sleep-requests", "2",
         "--retries", "10",
         "--fragment-retries", "10",
+        "--retry-sleep", "http:linear=3:30:3",
+        "--retry-sleep", "extractor:linear=5:20:5",
+        "--socket-timeout", "30",
         "--concurrent-fragments", "1",
         "--output", str(OUT_DIR / "%(title).180B [%(id)s].%(ext)s"),
         "--format", "bestaudio[ext=m4a]/bestaudio/best",
@@ -327,6 +331,12 @@ def build_cmd(url: str, client: str, skip_hls: bool, cookiefile: Optional[str]) 
         cmd[1:1] = ["--cookies", cookiefile]
 
     return cmd
+
+
+def shlex_quote(s: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_./:=+,-]+", s):
+        return s
+    return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
 def run_yt_dlp_once(url: str, label: str, client: str, skip_hls: bool, cookiefile: Optional[str]) -> Tuple[bool, str, Optional[Path]]:
@@ -369,35 +379,20 @@ def run_yt_dlp_once(url: str, label: str, client: str, skip_hls: bool, cookiefil
     if proc.returncode == 0 and final_path and final_path.exists():
         return True, output, final_path
 
-    err = last_meaningful_line(output) or f"yt-dlp exited with code {proc.returncode}"
-    return False, err, None
-
-
-def shlex_quote(s: str) -> str:
-    if re.fullmatch(r"[A-Za-z0-9_./:=+-]+", s):
-        return s
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def last_meaningful_line(output: str) -> str:
-    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-    for ln in reversed(lines):
-        if ln.startswith("ERROR:"):
-            return ln
-    return lines[-1] if lines else ""
+    return False, output, None
 
 
 def try_download(url: str, cookie_files: List[str]) -> Tuple[bool, str, Optional[Path]]:
-    cookies_available = [x for x in cookie_files if x not in INVALID_COOKIE_FILES]
-    cookie_order = cookies_available if cookies_available else []
+    usable_cookies = [x for x in cookie_files if x not in INVALID_COOKIE_FILES]
 
     for attempt in ATTEMPTS:
         if attempt["use_cookie"]:
-            if not cookie_order:
+            if not usable_cookies:
                 continue
-            for idx, cookiefile in enumerate(cookie_order):
+
+            for idx, cookiefile in enumerate(usable_cookies):
                 print(f"   -> cookie set #{idx} | {attempt['label']}")
-                ok, info, path = run_yt_dlp_once(
+                ok, output, path = run_yt_dlp_once(
                     url=url,
                     label=attempt["label"],
                     client=attempt["client"],
@@ -406,10 +401,16 @@ def try_download(url: str, cookie_files: List[str]) -> Tuple[bool, str, Optional
                 )
                 if ok:
                     return True, "", path
-                time.sleep(1)
+
+                if "The provided YouTube account cookies are no longer valid" in output:
+                    continue
+
+                if "HTTP Error 429" in output or "Sign in to confirm you’re not a bot" in output:
+                    time.sleep(8)
+
         else:
             print(f"   -> {attempt['label']}")
-            ok, info, path = run_yt_dlp_once(
+            ok, output, path = run_yt_dlp_once(
                 url=url,
                 label=attempt["label"],
                 client=attempt["client"],
@@ -418,11 +419,15 @@ def try_download(url: str, cookie_files: List[str]) -> Tuple[bool, str, Optional
             )
             if ok:
                 return True, "", path
-            time.sleep(1)
+
+            if "HTTP Error 429" in output or "Sign in to confirm you’re not a bot" in output:
+                break
+
+            time.sleep(3)
 
     if INVALID_COOKIE_FILES:
-        return False, "all attempts failed; at least one cookie set was reported invalid/rotated", None
-    return False, "all attempts failed", None
+        return False, "all attempts failed; at least one cookie set was invalid/rotated", None
+    return False, "all attempts failed (429/login_required)", None
 
 
 def main():
