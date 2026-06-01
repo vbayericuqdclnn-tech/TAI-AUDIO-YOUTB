@@ -1,7 +1,8 @@
 name: YouTube Audio to Drive
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: '*/50 * * * *'
   
 jobs:
   run:
