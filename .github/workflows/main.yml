@@ -1,8 +1,6 @@
 name: "YouTube Audio to Drive (fixed)"
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   
 
   workflow_dispatch: {}
@@ -15,8 +13,8 @@ jobs:
       contents: write
 
     env:
-      MAX_PER_RUN: "40"
-      SLEEP_SECONDS: "5"
+      MAX_PER_RUN: "100"
+      SLEEP_SECONDS: "15"
 
       LINKS_FILE: "links.txt"
       DALAY_FILE: "dalay.txt"
